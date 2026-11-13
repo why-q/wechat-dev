@@ -1,0 +1,10 @@
+[project]
+name = "wechat-dev-test"
+version = "0.1.0"
+description = "Plaintext WeChat test-account callback service"
+requires-python = ">=3.11"
+dependencies = [
+    "defusedxml>=0.7.1,<1",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
+]

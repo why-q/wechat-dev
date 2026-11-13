@@ -1,0 +1,27 @@
+[Unit]
+Description=WeChat test-account callback service
+After=network.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+WorkingDirectory=/srv/wechat-dev-test
+BindReadOnlyPaths=/root/Work/wechat_dev_test/app.py:/srv/wechat-dev-test/app.py
+BindReadOnlyPaths=/root/Work/wechat_dev_test/.venv:/srv/wechat-dev-test/.venv
+EnvironmentFile=/root/Work/wechat_dev_test/.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/wechat-dev-test/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000 --no-access-log --no-server-header
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+UMask=0077
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=strict
+PrivateTmp=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
