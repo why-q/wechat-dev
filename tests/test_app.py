@@ -362,6 +362,29 @@ class CallbackDashboardTests(unittest.TestCase):
             self.assertEqual(oversized.status_code, 413)
         self.assertEqual(questions, ["合成问题：开放时间是什么？"])
 
+    def test_rag_debug_endpoint_hides_provider_errors(self):
+        class FailingResponder:
+            def answer(self, question):
+                raise RuntimeError("private provider detail")
+
+        wechat_app.app.state.rag_responder = FailingResponder()
+        body = json.dumps({"question": "合成问题"}, ensure_ascii=False).encode()
+        with patch.object(wechat_app, "_RAG_DEBUG_TOKEN", "debug-only-token"):
+            with self.assertLogs("uvicorn.error", level="WARNING") as captured:
+                response = self.client.request(
+                    "POST",
+                    "/debug/rag/query",
+                    body=body,
+                    headers={"authorization": "Bearer debug-only-token"},
+                )
+
+        log_output = "\n".join(captured.output)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(json.loads(response.text), {"detail": "RAG query failed"})
+        self.assertIn("reason=query_error", log_output)
+        self.assertNotIn("private provider detail", response.text)
+        self.assertNotIn("private provider detail", log_output)
+
     def test_customer_message_uses_official_json_and_caches_access_token(self):
         requests = []
         results = iter([
