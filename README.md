@@ -79,7 +79,7 @@ curl --fail http://127.0.0.1:8080/healthz
 
 推送前先检查 `git status` 和 staged diff，只加入需要部署的源码、`Dockerfile`、`.dockerignore`、`rag-poc/pyproject.toml`、`rag-poc/uv.lock`、语料及 `rag-poc/index/`；不要加入任何 `.env`、API key、微信凭据、`.venv/`、`.cache/` 或本机配置。索引约 1.24 MB，已从两层 `.gitignore` 中取消忽略，以便 GitHub 构建上下文包含它；索引/语料更新需随代码重新提交。
 
-仓库可见性建议选择 **Private**。当前历史审计未发现 `.env` 或 `rag-poc/.env` 曾被提交，但 README、systemd 配置、服务器路径、域名和馆藏语料仍属于不必默认公开的部署信息；若确实要设为 Public，应先单独复核语料授权、基础设施细节和全部提交内容。
+当前仓库在 GitHub 上为 **Public**；本轮已确认当前提交内容可公开。历史审计未发现 `.env` 或 `rag-poc/.env` 曾被提交；README、systemd 配置、服务器路径、域名和馆藏语料仍属于部署信息，后续公开变更应继续复核。当前本地 `master` 跟踪 GitHub `main`，后续部署提交应推送到 `main`。
 
 在微信云托管控制台选择「绑定 GitHub 仓库」时，授权 GitHub 应用仅访问此仓库，选定部署分支，并把 Dockerfile 路径设为仓库根目录 `Dockerfile`、构建上下文设为仓库根目录、服务端口设为 `80`。确认构建日志实际包含 `rag-poc/index` 且镜像构建成功后，再发布服务版本。不要把 `.env` 上传到 GitHub；provider keys、`WECHAT_TOKEN` 等只通过云托管环境变量设置。
 
