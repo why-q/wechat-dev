@@ -83,12 +83,15 @@ def _loopback_probe_server(status_code=200):
         thread.join(timeout=5)
 
 from rag_poc.cli import (
+    ABSTENTION_TEXT,
     CHAT_PROBE_TEXT,
     CONFIG_CHECK_TIMEOUT_SECONDS,
     DEFAULT_MIN_SCORE,
     EMBEDDING_PROBE_TEXT,
+    RAG_REQUEST_TIMEOUT_SECONDS,
     ApiConfig,
     PoCError,
+    RagResponder,
     _embedding_model,
     _llm_model,
     _probe_chat_endpoint,
@@ -317,6 +320,90 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class OfflineHelperTests(unittest.TestCase):
+
+    def test_rag_responder_uses_bounded_provider_requests(self):
+        config = ApiConfig(
+            llm_api_base="https://chat.example/v1",
+            llm_api_key="chat-secret",
+            llm_model="chat-model",
+            embedding_api_base="https://embed.example/v1",
+            embedding_api_key="embedding-secret",
+            embedding_model="embed-model",
+        )
+        with (
+            patch("rag_poc.cli.load_api_config", return_value=config),
+            patch("llama_index.core.Settings", new=SimpleNamespace(embed_model=None, llm=None)),
+            patch("rag_poc.cli.configure_nltk_data_cache"),
+            patch("rag_poc.cli._embedding_model") as embedding_factory,
+            patch("rag_poc.cli._llm_model") as llm_factory,
+            patch("rag_poc.cli.load_index", return_value=object()),
+            patch(
+                "llama_index.core.query_engine.CitationQueryEngine.from_args",
+                return_value=object(),
+            ),
+        ):
+            RagResponder(index_dir=Path("unused-index"), corpus_dir=Path("unused-corpus"))
+
+        embedding_factory.assert_called_once_with(
+            config, timeout=30.0, max_retries=0
+        )
+        llm_factory.assert_called_once_with(
+            config, timeout=30.0, max_retries=0
+        )
+
+    def test_rag_responder_serializes_model_queries(self):
+        responder = object.__new__(RagResponder)
+        responder.query_engine = object()
+        responder.min_score = DEFAULT_MIN_SCORE
+        responder.corpus_dir = Path("unused-corpus")
+        responder._query_lock = threading.Lock()
+        first_entered = threading.Event()
+        second_entered = threading.Event()
+        release_first = threading.Event()
+        active = 0
+        max_active = 0
+        calls = 0
+        guard = threading.Lock()
+        answers = []
+        errors = []
+
+        def synthesize(*_args):
+            nonlocal active, max_active, calls
+            with guard:
+                calls += 1
+                call = calls
+                active += 1
+                max_active = max(max_active, active)
+            if call == 1:
+                first_entered.set()
+                release_first.wait(2)
+            else:
+                second_entered.set()
+            with guard:
+                active -= 1
+            return None
+
+        def answer():
+            try:
+                answers.append(responder.answer("合成问题"))
+            except Exception as error:
+                errors.append(error)
+
+        with patch("rag_poc.cli.synthesize_if_supported", side_effect=synthesize):
+            first = threading.Thread(target=answer)
+            second = threading.Thread(target=answer)
+            first.start()
+            self.assertTrue(first_entered.wait(1))
+            second.start()
+            self.assertFalse(second_entered.wait(0.1))
+            release_first.set()
+            first.join(2)
+            second.join(2)
+
+        self.assertFalse(first.is_alive() or second.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(answers, [ABSTENTION_TEXT, ABSTENTION_TEXT])
+        self.assertEqual(max_active, 1)
     def test_empty_or_unsupported_corpus_fails_before_any_api_setup(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
             corpus = Path(temporary_dir)

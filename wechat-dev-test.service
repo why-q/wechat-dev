@@ -7,21 +7,30 @@ Type=exec
 DynamicUser=yes
 WorkingDirectory=/srv/wechat-dev-test
 BindReadOnlyPaths=/root/Work/wechat_dev_test/app.py:/srv/wechat-dev-test/app.py
-BindReadOnlyPaths=/root/Work/wechat_dev_test/.venv:/srv/wechat-dev-test/.venv
+BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/rag_poc:/srv/wechat-dev-test/rag_poc
+BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/.venv:/srv/wechat-dev-test/.venv
+BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/index:/srv/wechat-dev-test/rag-poc/index
+BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/corpus:/srv/wechat-dev-test/rag-poc/corpus
+StateDirectory=wechat-dev-test
+StateDirectoryMode=0700
+Environment=HOME=/var/lib/private/wechat-dev-test
 EnvironmentFile=/root/Work/wechat_dev_test/.env
+EnvironmentFile=/root/Work/wechat_dev_test/rag-poc/.env
+Environment=RAG_INDEX_DIR=/srv/wechat-dev-test/rag-poc/index
+Environment=RAG_CORPUS_DIR=/srv/wechat-dev-test/rag-poc/corpus
+Environment=RAG_NLTK_DATA_DIR=/var/lib/private/wechat-dev-test/nltk_data
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/srv/wechat-dev-test/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8000 --no-access-log --no-server-header
+ExecStart=/srv/wechat-dev-test/.venv/bin/python -m uvicorn app:app --app-dir /srv/wechat-dev-test --host 127.0.0.1 --port 8000 --no-access-log --no-server-header
 Restart=on-failure
 RestartSec=2
-TimeoutStopSec=15
+TimeoutStopSec=60
 UMask=0077
 NoNewPrivileges=yes
-ProtectHome=yes
 ProtectSystem=strict
+ProtectHome=yes
 PrivateTmp=yes
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-
 [Install]
 WantedBy=multi-user.target

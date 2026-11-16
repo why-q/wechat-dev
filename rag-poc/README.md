@@ -1,8 +1,8 @@
-# 离线馆藏 RAG PoC
+# 公众号馆藏 RAG 与离线 PoC
 
-`rag-poc/` 是独立的离线试验目录，不属于微信回调服务，不会读取微信凭据或调用微信 API。PoC 只面向获准使用的公开馆藏文档和合成问题；不要放入真实读者消息、OpenID 或个人信息。公开文档片段和合成问题会发送到你配置的远程模型 API；provider 条款尚未核实，真实微信接入前必须重新评估数据边界。
+`rag-poc/` 是公众号馆藏 RAG 的运行代码及离线查询 CLI。公众号仅调用本目录中的 RAG responder；PoC 可用合成问题独立检索，不调用微信 API。生产服务会将真实读者问题正文与命中的馆藏片段发送到 `.env` 配置的远程模型 API；OpenID 只用于后续微信客服消息发送，不发给模型。provider 的数据区域与留存条款尚未核实。仅在获得所需数据处理授权后启用实时 RAG。公开文档片段和合成问题也会发送到远程 API。在线 responder 对每次 provider 请求设 30 秒超时且不重试；一条回答可能依次发起多次请求。发送到微信的文本保守限制在 1800 UTF-8 字节，超长回答会截短并优先保留来源编号。
 
-框架采用 LlamaIndex：默认本地 `SimpleVectorStore`，并用 LlamaIndex 的 storage context 保存向量、docstore 和 index store。PDF、TXT、Markdown 由文件 reader 抽取可读取文本；不承诺扫描件/OCR。索引和凭据不应提交到版本库。
+框架采用 LlamaIndex：默认本地 `SimpleVectorStore`，并用 LlamaIndex 的 storage context 保存向量、docstore 和 index store。PDF、TXT、Markdown 由文件 reader 抽取可读取文本；不承诺扫描件/OCR。当前 `index/` 是云托管镜像的部署产物，需随公开语料和代码提交到 GitHub；凭据、`.env`、`.venv/` 和 `.cache/` 仍不得提交到版本库。
 
 首次运行 `index` 或 `query` 时，PoC 会把 LlamaIndex 随包提供的 NLTK stopwords 与 Punkt 资源复制到 `rag-poc/.cache/nltk_data/`。这是项目私有、权限收紧的本地缓存：文件只复制一次、普通文件使用 `0600`、目录使用 `0700`；不下载 NLTK 数据，也不关闭 NLTK 的路径安全检查。之后索引和查询共用该缓存。
 

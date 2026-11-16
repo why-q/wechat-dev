@@ -2,11 +2,19 @@
 
 ## 当前状态
 
-用户已决定使用 LlamaIndex，独立离线 PoC 目录现已创建。线上 FastAPI 微信回调仍没有接入 LLM 或 RAG。
+公众号回调代码已接入 LlamaIndex `RagResponder`：文字消息在返回 `success` 后经远程 embedding/chat API 查询本地索引，再通过微信客服 API 发送带来源的回答；OpenID 不传给模型。若 RAG 初始化失败，服务仍启动以提供 health 和非文字回调，但文字回调返回 HTTP 503 且不确认；查询失败则发送通用回复，不记录 provider 异常。
 
-当前服务仍是 FastAPI 微信测试号回调：文字消息快速 ACK，等待 10 秒后发送固定测试回复，没有接入 LLM 或 RAG。用户在新版 `sendcustommessage` 实现和服务重启后报告固定回复测试已成功，这是较新的用户报告，不是助手独立复验；旧项目背景文档中的未验证状态早于该报告，尚未同步。当前 `pyproject.toml` 只有 defusedxml、FastAPI 和 Uvicorn。
+新版 RAG unit 已经 daemon-reload 并重启；systemd 加载根 `.env` 和 `rag-poc/.env`。用户最近运行重启脚本并报告服务 active、RAG 初始化成功、`/healthz` 返回 ok。最近一次直接调用微信 access-token API 成功，返回有效期 7200 秒；这证明当时 AppID/AppSecret 与 API 调用来源可获取 access_token，不代表客服消息已送达。用户报告已轮换公众号 AppSecret；`WECHAT_TOKEN` 是否轮换或与后台一致尚未确认。用户浏览器访问公网 `/wechat` 得到 `invalid signature`，与请求到达应用但未通过签名校验相符，不代表微信后台验证成功；公网 `/health` 返回 404 是因为 Nginx 只反代 `/wechat`，健康端点 `/healthz` 仅供本机检查。用户已确认所需数据处理授权及 provider 数据区域/留存条款；合成 live provider 探针通过。一次本机签名合成文字回调得到 `success`，RAG 生成了带引用编号的回答，但所列摘录未清楚支持答案，引用相关性仍需评估；此前合成 OpenID 的客服消息尝试返回 `errcode=48001`，未证明手机送达。
 
-现有服务继续以 `DynamicUser`、`ProtectSystem=strict`、`ProtectHome=yes` 运行，工作目录为 `/srv/wechat-dev-test`，只读绑定 `app.py` 和根 `.venv`，没有绑定 `rag-poc`。PoC 已放在独立 `rag-poc/`，使用自己的 `.venv` 和依赖锁文件，不修改生产 service，也不接收真实微信回调。
+## 微信云托管迁移
+
+代码侧已完成第一版云托管适配：新增根目录 `Dockerfile` 与 `.dockerignore`，镜像内通过 `PYTHONPATH=/app/rag-poc` 加载 `rag_poc` 包，并打包当前索引和语料。用户已选定直接使用云托管默认公网域名，不绑定个人域名；因此实际部署路线为公网入口 + 原有公众号 signature/XML 协议，设置 `WECHAT_CLOUD_PUSH_ENABLED=false`，不启用会覆盖公众号服务器 URL 的云托管「消息推送」。云推送 JSON/XML 和 `CheckContainerPath` 仅作为关闭公网访问时的备选分支保留。客服消息在配置开放接口服务后通过云调用发送，但账号权限和线上送达尚未验证；`DASHBOARD_ENABLED=false` 时 `/` 和 `/messages` 返回 404。
+
+本地回归测试 19/19 通过。本地 Docker smoke 已验证镜像内 `import rag_poc`、`/healthz`、云托管路径检测、普通签名 GET echo，以及看板关闭后的 404；使用占位 provider endpoint 实例化 `RagResponder()` 也成功，证明当前索引能被镜像加载，但不代表真实 provider 网络可用。镜像构建使用锁定的 `rag-poc/uv.lock`，当前 Docker 构建工具固定为 uv 0.10.12。
+
+云端尚未发布，原因不是代码 blocker，而是需要在已登录的云托管控制台完成主体和服务配置：官方文档说明环境按所选小程序/公众号主体创建，但没有在文档中明确承诺公众平台测试号资格；必须实际确认测试号能否被选择并创建环境。当前路线需要开启服务公网访问、发布端口 80、设置最小/最大副本为 1、设置 `DASHBOARD_ENABLED=false`、开启开放接口服务并将 `/cgi-bin/message/custom/send` 加入云调用白名单，然后把公众号服务器 URL 指向云托管默认域名的 `/wechat`，不要启用会覆盖该 URL 的云托管「消息推送」。云托管没有固定公网出口 IP，不能配置旧服务器 IP 作为直连微信 API 白名单；默认公网域名仅用于接口测试，本轮接受该限制，不绑定个人域名。此前同一账号直连客服 API 曾返回 `48001`，开放接口服务不会自动补齐账号权限，云端客服发送仍未真实验证；若仍为 `48001`，需开通账号能力或改用受 5 秒限制的被动回复。
+
+当前回调为快速 ACK 后执行 `BackgroundTasks`。因为 RAG 实测可能超过微信约 5 秒回调窗口，本轮不改为同步等待；云托管试运行必须保持最小副本 1、最大副本 1。这仍不是持久队列，实例崩溃、发布或网络故障可能丢失回复；多副本和正式可靠投递前需要持久化状态及 worker/队列。
 
 ## PoC 已创建
 
@@ -16,7 +24,7 @@
 
 问题命令使用 LlamaIndex `CitationQueryEngine`，普通 chat 模式关闭 function calling。检索后先按 `min_score` 筛证据，未达门槛时输出固定拒答文案且不调用生成；达标时调用模型，但模型也可能自行拒答。来源序号会与 `source_nodes` 校验，引用列出语料相对路径和可用页码/章节，并附从对应 citation chunk 本文提取、折叠空白后截断到最多 40 个 Unicode 字符的摘录，不由模型生成。当前 `min_score=0.2` 尚未经过系统评测校准，答案与引用质量也未系统评测。
 
-`.env.example` 和 README 已列出所需的六项 PoC 专用变量：`RAG_LLM_API_BASE`、`RAG_LLM_API_KEY`、`RAG_LLM_MODEL`、`RAG_EMBEDDING_API_BASE`、`RAG_EMBEDDING_API_KEY`、`RAG_EMBEDDING_MODEL`。索引只需 embedding 三项，查询需要全部六项。PoC 自己的 `.env`、`.venv`、`.cache/` 和 `index/` 已由 `rag-poc/.gitignore` 忽略。没有改动根 `pyproject.toml`、根 `.venv`、根 `.env`、`app.py`、service 或 Nginx。
+`.env.example` 和 README 列出 PoC 的六项 provider 配置。生产 service 与回调代码现已改为使用 PoC 的锁定虚拟环境、索引和 provider 配置；未修改根项目依赖或 Nginx。
 
 已定位分词失败原因：锁定环境中的 NLTK `pathsec.py` `_hardened_open()` 在 `st_nlink > 1` 时拒绝打开文件（第 2238 至 2243 行）。LlamaIndex 随包的 stopwords 34 个文件和 punkt_tab 77 个文件均为 `nlink=2`、权限 `0644`、属主 root，因此触发安全拒绝。用临时私有目录准备独立资源后，`wait_for_nltk_check()` 和 Punkt tokenizer 均成功，资源文件 link count 全为 1；没有下载数据或改动 site-packages。
 
@@ -32,15 +40,15 @@ PoC 独立 `.venv` 中 `uv sync --locked` 成功。来源摘录修复后的最�
 
 用户可从 `rag-poc/` 运行 `uv run --locked python -m rag_poc.cli check-config`，或用 `check-config --only-config` 显式表示离线路径；缺配置或格式错误以非零状态退出。只有在确认允许产生远程流量和可能费用、并已提供真实凭据时才运行 `check-config --live`；两类探针均通过才返回零状态。永久测试仅把 `--live` 指向 127.0.0.1 临时 server，不连接真实 provider，也不会调用微信或发送真实读者数据。
 
-## 尚未确定
+## 生产接入与风险
 
-用户此前报告已配置六项 `RAG_LLM_*` 和 `RAG_EMBEDDING_*` 变量，并向 `rag-poc/corpus/` 添加 4 个 Markdown 文档。本轮未读取凭据或文档正文；实际索引与查询均已成功。三条问题得到的 `0.329364–0.628630` 只是经验间隔，不是校准阈值；默认值保持 `0.2`。后续在至少 5 条无关问题组成的固定标注 eval 集阶段评估阈值表现，届时再考虑校准，不代表目前已有这组问题或已完成校准。答案事实、引用准确度和无答案问题的拒答能力尚未系统评测，provider 服务条款仍未核实。
+实时 RAG 会将真实读者问题正文和检索到的馆藏片段发送到 `rag-poc/.env` 配置的远程 embedding/chat provider；OpenID 仅用于微信客服消息 API。用户已确认数据处理授权及 provider 数据区域/留存条款；答案事实、引用、拒答能力和 `min_score=0.2` 仍未系统评测。
 
-当前批准的离线文档 PoC 使用公开资料和合成问题，调用已配置的远程 LLM 与 embedding API，暂不接入微信消息。这是本轮验证范围，不是隐私结论。公开片段和合成问题会发送到已配置的远程 API，provider 的数据处理条款尚未核实；按用户决定，隐私评估暂不阻塞本轮工作。用户提出的“当前读者消息不包含个人信息”只是工作假设，不构成真实消息外发授权。
+服务故障时发通用回复，不暴露 provider 异常；非文字回调不调用 RAG。正式试运行仍待验证：最近一次直接 access-token API 探针成功，但 `WECHAT_TOKEN` 是否轮换及是否与公众号后台 Token 一致尚未确认；客服消息真实用户路径和手机送达也尚未验证。
 
-### 生产接入前重新评估
+## 试运行前置条件
 
-在把真实读者消息正文、检索片段或 OpenID 发送给外部 LLM/embedding API，或将 RAG 接入实时微信之前，必须重新评估并明确数据处理边界，包括 provider 区域与留存、日志和消息保存、OpenID 处理，以及审批和权限。当前离线 PoC 外发公开片段和合成问题仍按用户决定不做隐私评估，也不作为 blocker；这一工作假设不等于批准发送真实消息。
+RAG 版本已部署并通过启动与本地 HTTP smoke。一次本机签名合成文字回调走通检索、生成和引用格式化，但来源摘录未清楚支持答案，不能据此认定引用可靠。此前合成 OpenID 的客服消息尝试返回 `errcode=48001`；最近一次直接 access-token API 探针成功，说明 AppID/AppSecret 与 API 调用来源可获取 access_token，但客服消息真实用户路径仍需实测。`WECHAT_TOKEN` 是否轮换及后台是否匹配尚未知。公网 `/wechat` 在用户浏览器中返回 `invalid signature`，表明无签名请求到达应用但未通过验签，不等于微信后台验证成功；公网 `/health` 返回 404 是预期路由边界，Nginx 只反代 `/wechat`，`/healthz` 仅供本机检查。实际手机消息送达仍需由用户通过微信客户端触发并确认。修改 unit 或任一 `.env` 后，使用仓库根目录 `sudo ./restart-wechat-dev-test.sh`，确认脚本报告 RAG 初始化成功且 health check 通过。
 
 ## 评估范围与机器快照
 
@@ -50,4 +58,4 @@ PoC 独立 `.venv` 中 `uv sync --locked` 成功。来源摘录修复后的最�
 
 ## 下一步
 
-下一步建立固定标注的相关/无关 eval 集，核对答案与来源、评估检索阈值和模型自然拒答，再记录抽取、embedding、检索与生成的延迟和成本。当前 `min_score` 保持 `0.2`。真实微信消息、OpenID 和外呼仍不属于当前 PoC。
+下一步建立固定标注的相关/无关 eval 集，核对答案与来源、评估检索阈值和模型自然拒答，再记录抽取、embedding、检索与生成的延迟和成本。离线 PoC 评估与真实微信试运行是两项独立工作。

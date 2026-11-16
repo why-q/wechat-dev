@@ -6,6 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -23,6 +24,7 @@ DEFAULT_CHUNK_OVERLAP = 80
 DEFAULT_TOP_K = 4
 DEFAULT_MIN_SCORE = 0.2
 CONFIG_CHECK_TIMEOUT_SECONDS = 10.0
+RAG_REQUEST_TIMEOUT_SECONDS = 30.0
 CHAT_PROBE_TEXT = "Synthetic chat connectivity probe. Reply with one short word."
 EMBEDDING_PROBE_TEXT = "Synthetic embedding connectivity probe."
 ABSTENTION_TEXT = "馆藏资料中没有足够的可检索证据回答此问题。"
@@ -32,7 +34,9 @@ class PoCError(Exception):
     """Expected user-facing PoC errors, without provider details."""
 
 
-def configure_nltk_data_cache(cache_dir: Path = DEFAULT_NLTK_DATA_DIR) -> None:
+def configure_nltk_data_cache(cache_dir: Path | None = None) -> None:
+    if cache_dir is None:
+        cache_dir = Path(os.environ.get("RAG_NLTK_DATA_DIR", DEFAULT_NLTK_DATA_DIR))
     from llama_index.core import utils as core_utils
 
     cache_dir = Path(cache_dir)
@@ -502,6 +506,101 @@ def load_index(index_dir: Path, embedding_model):
         ) from None
 
 
+class RagResponder:
+    def __init__(
+        self,
+        index_dir: Path | None = None,
+        corpus_dir: Path | None = None,
+        *,
+        top_k: int = DEFAULT_TOP_K,
+        min_score: float = DEFAULT_MIN_SCORE,
+    ) -> None:
+        if top_k <= 0:
+            raise PoCError("--top-k 必须是正整数。")
+        if not 0 <= min_score <= 1:
+            raise PoCError("--min-score 必须在 0 到 1 之间。")
+        self.index_dir = Path(
+            index_dir if index_dir is not None else os.environ.get("RAG_INDEX_DIR", DEFAULT_INDEX_DIR)
+        )
+        self.corpus_dir = Path(
+            corpus_dir if corpus_dir is not None else os.environ.get("RAG_CORPUS_DIR", DEFAULT_CORPUS_DIR)
+        )
+        self.min_score = min_score
+        self._query_lock = threading.Lock()
+        config = load_api_config(os.environ, require_llm=True)
+        configure_nltk_data_cache()
+        try:
+            from llama_index.core import Settings
+            from llama_index.core.prompts import PromptTemplate
+            from llama_index.core.query_engine import CitationQueryEngine
+
+            embedding = _embedding_model(
+                config, timeout=RAG_REQUEST_TIMEOUT_SECONDS, max_retries=0
+            )
+            llm = _llm_model(
+                config, timeout=RAG_REQUEST_TIMEOUT_SECONDS, max_retries=0
+            )
+            Settings.embed_model = embedding
+            Settings.llm = llm
+            index = load_index(self.index_dir, embedding)
+            self.query_engine = CitationQueryEngine.from_args(
+                index,
+                llm=llm,
+                similarity_top_k=top_k,
+                citation_chunk_size=DEFAULT_CHUNK_SIZE,
+                citation_chunk_overlap=DEFAULT_CHUNK_OVERLAP,
+                citation_qa_template=PromptTemplate(
+                    "Answer only from the provided source text. Do not use prior knowledge. "
+                    "If the sources do not contain enough evidence, say so plainly. "
+                    "Cite supported claims with the provided source numbers in [n] form. "
+                    "Never invent or output URLs or links.\n\n"
+                    "Sources:\n{context_str}\n\nQuestion: {query_str}\nAnswer: "
+                ),
+                citation_refine_template=PromptTemplate(
+                    "Answer only from the provided source text and do not use prior knowledge. "
+                    "If the sources do not contain enough evidence, say so plainly. "
+                    "Cite supported claims with the provided source numbers in [n] form. "
+                    "Never invent or output URLs or links.\n"
+                    "Question: {query_str}\nExisting answer: {existing_answer}\n"
+                    "Additional numbered sources:\n{context_msg}\n"
+                    "Refine only when the new sources support it; otherwise retain the answer.\n"
+                    "Answer: "
+                ),
+            )
+        except PoCError:
+            raise
+        except Exception:
+            raise PoCError(
+                "RAG 服务初始化失败（索引或本地依赖不可用）；未显示底层异常。"
+            ) from None
+
+    def answer(self, question: str) -> str:
+        if not question.strip():
+            raise PoCError("问题不能为空。")
+        try:
+            from llama_index.core.schema import QueryBundle
+
+            with self._query_lock:
+                response = synthesize_if_supported(
+                    self.query_engine, QueryBundle(question), self.min_score
+                )
+            if response is None:
+                return ABSTENTION_TEXT
+            answer = strip_model_links(str(response).strip())
+            if not answer:
+                raise PoCError("LLM 返回空回答；没有可显示的答案。")
+            references = citation_source_references(
+                getattr(response, "source_nodes", None), self.corpus_dir
+            )
+            return answer + "\n\n可核对来源：\n" + "\n".join(references)
+        except PoCError:
+            raise
+        except Exception:
+            raise PoCError(
+                "查询失败（embedding/LLM API 请求失败，或索引不可用）。未显示底层异常或 endpoint。"
+            ) from None
+
+
 def query_index(
     question: str,
     index_dir: Path,
@@ -510,77 +609,14 @@ def query_index(
     top_k: int = DEFAULT_TOP_K,
     min_score: float = DEFAULT_MIN_SCORE,
 ) -> None:
-    if top_k <= 0:
-        raise PoCError("--top-k 必须是正整数。")
-    if not 0 <= min_score <= 1:
-        raise PoCError("--min-score 必须在 0 到 1 之间。")
-    if not question.strip():
-        raise PoCError("问题不能为空。")
+    responder = RagResponder(
+        index_dir,
+        corpus_dir,
+        top_k=top_k,
+        min_score=min_score,
+    )
+    print(responder.answer(question))
 
-    if not index_dir.is_dir() or not any(index_dir.iterdir()):
-        raise PoCError(
-            f"索引不存在：{index_dir}。请先运行 index 命令生成本地索引。"
-        )
-    config = load_api_config(os.environ, require_llm=True)
-    configure_nltk_data_cache()
-    try:
-        from llama_index.core import Settings
-        from llama_index.core.prompts import PromptTemplate
-        from llama_index.core.query_engine import CitationQueryEngine
-        from llama_index.core.schema import QueryBundle
-
-        embed_model = _embedding_model(config)
-        llm = _llm_model(config)
-        Settings.embed_model = embed_model
-        Settings.llm = llm
-        index = load_index(index_dir, embed_model)
-        engine = CitationQueryEngine.from_args(
-            index,
-            llm=llm,
-            similarity_top_k=top_k,
-            citation_chunk_size=DEFAULT_CHUNK_SIZE,
-            citation_chunk_overlap=DEFAULT_CHUNK_OVERLAP,
-            citation_qa_template=PromptTemplate(
-                "Answer only from the provided source text. Do not use prior knowledge. "
-                "If the sources do not contain enough evidence, say so plainly. "
-                "Cite supported claims with the provided source numbers in [n] form. "
-                "Never invent or output URLs or links.\n\n"
-                "Sources:\n{context_str}\n\nQuestion: {query_str}\nAnswer: "
-            ),
-            citation_refine_template=PromptTemplate(
-                "Answer only from the provided source text and do not use prior knowledge. "
-                "If the sources do not contain enough evidence, say so plainly. "
-                "Cite supported claims with the provided source numbers in [n] form. "
-                "Never invent or output URLs or links.\n"
-                "Question: {query_str}\nExisting answer: {existing_answer}\n"
-                "Additional numbered sources:\n{context_msg}\n"
-                "Refine only when the new sources support it; otherwise retain the answer.\n"
-                "Answer: "
-            ),
-        )
-        query_bundle = QueryBundle(question)
-        response = synthesize_if_supported(engine, query_bundle, min_score)
-        if response is None:
-            print(ABSTENTION_TEXT)
-            return
-
-        answer = strip_model_links(str(response).strip())
-        if not answer:
-            raise PoCError("LLM 返回空回答；没有可显示的答案。")
-        references = citation_source_references(
-            getattr(response, "source_nodes", None), corpus_dir
-        )
-        print(answer)
-        print("\n可核对来源：")
-        for reference in references:
-            print(reference)
-    except PoCError:
-        raise
-    except Exception:
-        raise PoCError(
-            "查询失败（embedding/LLM API 请求失败，或索引不可用）。未显示底层异常或 endpoint；"
-            "请检查 API base/model/key、网络及 provider 兼容性。"
-        ) from None
 
 
 def _positive_int(value: str) -> int:

@@ -1,7 +1,7 @@
 [project]
-name = "wechat-dev-test-rag-poc"
+name = "wechat-dev-test-rag"
 version = "0.1.0"
-description = "Offline library-corpus RAG proof of concept using LlamaIndex"
+description = "LlamaIndex-backed RAG for the WeChat callback service and offline CLI"
 requires-python = ">=3.11"
 dependencies = [
     "llama-index-core>=0.12,<1",
@@ -9,6 +9,9 @@ dependencies = [
     "llama-index-llms-openai-like>=0.4,<1",
     "llama-index-embeddings-openai-like>=0.4,<1",
     "python-dotenv>=1,<2",
+    "defusedxml>=0.7.1,<1",
+    "fastapi>=0.115,<1",
+    "uvicorn>=0.34,<1",
 ]
 
 [tool.uv]
