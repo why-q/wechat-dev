@@ -36,6 +36,7 @@ _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
 _CLOUD_PUSH_ENABLED = _env_flag("WECHAT_CLOUD_PUSH_ENABLED", False)
 _DASHBOARD_ENABLED = _env_flag("DASHBOARD_ENABLED", True)
 _WECHAT_OPEN_API_ENABLED = _env_flag("WECHAT_OPEN_API_ENABLED", False)
+_RAG_DEBUG_TOKEN = os.environ.get("RAG_DEBUG_TOKEN", "")
 if not _TOKEN and not _CLOUD_PUSH_ENABLED:
     raise RuntimeError("WECHAT_TOKEN must be set unless Cloud Hosting push mode is enabled")
 
@@ -68,6 +69,7 @@ app = FastAPI(
 MAX_MESSAGES = 100
 MAX_CUSTOMER_MESSAGE_BYTES = 1800
 _RAG_ERROR_REPLY = "抱歉，我暂时无法处理这个问题，请稍后再试。"
+MAX_RAG_DEBUG_QUESTION_CHARS = 2000
 _ACCESS_TOKEN_REFRESH_MARGIN_SECONDS = 60
 _ACCESS_TOKEN_LOCK = threading.Lock()
 _ACCESS_TOKEN: str | None = None
@@ -461,6 +463,46 @@ async def recent_messages() -> JSONResponse:
 @app.get("/healthz", response_class=PlainTextResponse)
 async def health() -> PlainTextResponse:
     return PlainTextResponse("ok", headers=_HEADERS)
+
+
+@app.post("/debug/rag/query", response_class=JSONResponse)
+async def debug_rag_query(request: Request) -> JSONResponse:
+    if not _RAG_DEBUG_TOKEN:
+        raise HTTPException(404, "not found")
+    scheme, separator, supplied_token = request.headers.get("authorization", "").partition(" ")
+    if (
+        scheme.lower() != "bearer"
+        or not separator
+        or not supplied_token
+        or not hmac.compare_digest(supplied_token, _RAG_DEBUG_TOKEN)
+    ):
+        raise HTTPException(
+            401,
+            "invalid bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, "invalid JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(422, "JSON object required")
+    question = payload.get("question")
+    if not isinstance(question, str) or not question.strip():
+        raise HTTPException(422, "question must be a non-empty string")
+    if len(question) > MAX_RAG_DEBUG_QUESTION_CHARS:
+        raise HTTPException(413, "question is too long")
+
+    responder = getattr(app.state, "rag_responder", None)
+    if responder is None:
+        raise HTTPException(503, "RAG responder is not ready")
+    try:
+        answer = await asyncio.to_thread(responder.answer, question)
+    except Exception:
+        _LOGGER.warning("RAG debug query failed: reason=query_error")
+        raise HTTPException(502, "RAG query failed") from None
+    return JSONResponse({"answer": answer}, headers=_HEADERS)
 
 
 @app.get("/wechat", response_class=PlainTextResponse)

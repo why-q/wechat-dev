@@ -317,6 +317,51 @@ class CallbackDashboardTests(unittest.TestCase):
         message = json.loads(self.client.request("GET", "/messages").text)[0]
         self.assertEqual(message["reply"], wechat_app._RAG_ERROR_REPLY)
         self.assertEqual(message["reply_status"], "failed")
+
+    def test_rag_debug_endpoint_requires_token_and_returns_query_answer(self):
+        questions = []
+
+        class Responder:
+            def answer(self, question):
+                questions.append(question)
+                return "合成回答\n\n可核对来源：\n[1] hours.md"
+
+        wechat_app.app.state.rag_responder = Responder()
+        body = json.dumps({"question": "合成问题：开放时间是什么？"}, ensure_ascii=False).encode()
+        with patch.object(wechat_app, "_RAG_DEBUG_TOKEN", ""):
+            disabled = self.client.request("POST", "/debug/rag/query", body=body)
+        self.assertEqual(disabled.status_code, 404)
+
+        with patch.object(wechat_app, "_RAG_DEBUG_TOKEN", "debug-only-token"):
+            unauthorized = self.client.request(
+                "POST",
+                "/debug/rag/query",
+                body=body,
+                headers={"authorization": "Bearer wrong-token"},
+            )
+            self.assertEqual(unauthorized.status_code, 401)
+
+            response = self.client.request(
+                "POST",
+                "/debug/rag/query",
+                body=body,
+                headers={"authorization": "Bearer debug-only-token"},
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(
+                json.loads(response.text),
+                {"answer": "合成回答\n\n可核对来源：\n[1] hours.md"},
+            )
+
+            oversized = self.client.request(
+                "POST",
+                "/debug/rag/query",
+                body=json.dumps({"question": "x" * (wechat_app.MAX_RAG_DEBUG_QUESTION_CHARS + 1)}).encode(),
+                headers={"authorization": "Bearer debug-only-token"},
+            )
+            self.assertEqual(oversized.status_code, 413)
+        self.assertEqual(questions, ["合成问题：开放时间是什么？"])
+
     def test_customer_message_uses_official_json_and_caches_access_token(self):
         requests = []
         results = iter([
