@@ -204,15 +204,22 @@ class CallbackDashboardTests(unittest.TestCase):
             },
             ensure_ascii=False,
         ).encode("utf-8")
-        with patch.object(wechat_app, "_send_customer_message", return_value=True) as send:
-            with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
-                response = self.client.request(
-                    "POST",
-                    "/wechat",
-                    body=body,
-                    headers={"x-wx-source": "cloudbase", "content-type": "application/json"},
-                )
+        with self.assertLogs("uvicorn.error", level="INFO") as captured:
+            with patch.object(wechat_app, "_send_customer_message", return_value=True) as send:
+                with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+                    response = self.client.request(
+                        "POST",
+                        "/wechat",
+                        body=body,
+                        headers={"x-wx-source": "cloudbase", "content-type": "application/json"},
+                    )
         self.assertEqual((response.status_code, response.text), (200, "success"))
+        logged = "\n".join(captured.output)
+        self.assertIn("WeChat callback accepted: type=text transport=cloud", logged)
+        self.assertIn("WeChat reply task scheduled:", logged)
+        self.assertNotIn("reader-id", logged)
+        self.assertNotIn("official-id", logged)
+        self.assertNotIn("开放时间？", logged)
         send.assert_called_once_with("reader-id", answer)
         self.assertEqual(questions, ["开放时间？"])
 
@@ -277,6 +284,20 @@ class CallbackDashboardTests(unittest.TestCase):
         self.assertEqual(responder.questions, [text])
         send.assert_called_once_with(reader, answer)
         logged = "\n".join(captured.output)
+        scheduled = next(
+            line for line in captured.output if "WeChat reply task scheduled:" in line
+        )
+        record_id = scheduled.rsplit("record_id=", 1)[1]
+        self.assertIn("WeChat callback accepted: type=text transport=signed", logged)
+        self.assertIn(f"WeChat reply task started: record_id={record_id}", logged)
+        self.assertIn(f"RAG reply generation started: record_id={record_id}", logged)
+        self.assertIn(f"RAG reply generation completed: record_id={record_id} duration_ms=", logged)
+        self.assertIn(f"WeChat reply send started: record_id={record_id}", logged)
+        self.assertIn(f"WeChat reply task finished: status=accepted record_id={record_id}", logged)
+        self.assertIn("WeChat reply task skipped: reason=duplicate_message", logged)
+        self.assertNotIn("rag-1", logged)
+        self.assertNotIn("test-nonce", logged)
+        self.assertNotIn("private provider", logged)
         self.assertNotIn(reader, logged)
         self.assertNotIn(official, logged)
         self.assertNotIn(text, logged)
@@ -478,10 +499,12 @@ class CallbackDashboardTests(unittest.TestCase):
     def test_customer_message_requires_errcode_zero(self):
         with patch.object(wechat_app, "_get_access_token", return_value="test-access-token"):
             with patch.object(wechat_app, "_request_json", return_value={"errcode": 40003}):
-                with self.assertLogs("uvicorn.error", level="WARNING") as captured:
+                with self.assertLogs("uvicorn.error", level="INFO") as captured:
                     self.assertFalse(wechat_app._send_customer_message("synthetic-reader", "reply"))
-        self.assertIn("errcode=40003", captured.output[0])
-        self.assertNotIn("synthetic-reader", captured.output[0])
+        logged = "\n".join(captured.output)
+        self.assertIn("WeChat customer message request started: mode=access_token_api", logged)
+        self.assertIn("WeChat delayed reply failed: mode=access_token_api errcode=40003", logged)
+        self.assertNotIn("synthetic-reader", logged)
 
     def test_non_text_event_returns_success_without_sending(self):
         with patch.object(wechat_app, "_send_customer_message") as send:

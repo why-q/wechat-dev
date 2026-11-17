@@ -253,6 +253,9 @@ def _send_customer_message(to_user: str, content: str) -> bool:
         "msgtype": "text",
         "text": {"content": _limit_customer_message(content)},
     }
+    mode = "cloud_open_api" if _WECHAT_OPEN_API_ENABLED else "access_token_api"
+    request_started_at = time.monotonic()
+    _LOGGER.info("WeChat customer message request started: mode=%s", mode)
     try:
         if _WECHAT_OPEN_API_ENABLED:
             result = _request_json(
@@ -265,41 +268,92 @@ def _send_customer_message(to_user: str, content: str) -> bool:
                 f"https://api.weixin.qq.com/cgi-bin/message/custom/send?{query}",
                 payload,
             )
-    except Exception:
-        _LOGGER.warning("WeChat delayed reply failed: reason=api_request_error")
+    except Exception as exc:
+        _LOGGER.warning(
+            "WeChat delayed reply failed: reason=api_request_error mode=%s error_type=%s duration_ms=%d",
+            mode,
+            type(exc).__name__,
+            round((time.monotonic() - request_started_at) * 1000),
+        )
         return False
     errcode = result.get("errcode")
     if type(errcode) is not int or errcode != 0:
+        duration_ms = round((time.monotonic() - request_started_at) * 1000)
         if type(errcode) is int:
-            _LOGGER.warning("WeChat delayed reply failed: errcode=%d", errcode)
+            _LOGGER.warning(
+                "WeChat delayed reply failed: mode=%s errcode=%d duration_ms=%d",
+                mode,
+                errcode,
+                duration_ms,
+            )
         else:
-            _LOGGER.warning("WeChat delayed reply failed: reason=invalid_errcode")
+            _LOGGER.warning(
+                "WeChat delayed reply failed: reason=invalid_errcode mode=%s duration_ms=%d",
+                mode,
+                duration_ms,
+            )
         return False
-    _LOGGER.info("WeChat customer message API accepted: errcode=0")
+    _LOGGER.info(
+        "WeChat customer message API accepted: errcode=0 mode=%s duration_ms=%d",
+        mode,
+        round((time.monotonic() - request_started_at) * 1000),
+    )
     return True
 
 
 async def _answer_then_send(
     responder, question: str, to_user: str, record_id: int
 ) -> None:
+    started_at = time.monotonic()
+    _LOGGER.info("WeChat reply task started: record_id=%d", record_id)
     try:
-        reply = _limit_customer_message(
-            await asyncio.to_thread(responder.answer, question)
+        _LOGGER.info("RAG reply generation started: record_id=%d", record_id)
+        try:
+            reply = _limit_customer_message(
+                await asyncio.to_thread(responder.answer, question)
+            )
+        except Exception as exc:
+            code, _, error_type = _rag_failure_details(exc, "rag_query_unexpected_error")
+            _LOGGER.warning(
+                "RAG response unavailable: code=%s error_type=%s record_id=%d",
+                code,
+                error_type,
+                record_id,
+            )
+            reply = _RAG_ERROR_REPLY
+        else:
+            _LOGGER.info(
+                "RAG reply generation completed: record_id=%d duration_ms=%d",
+                record_id,
+                round((time.monotonic() - started_at) * 1000),
+            )
+
+        _LOGGER.info("WeChat reply send started: record_id=%d", record_id)
+        try:
+            sent = await asyncio.to_thread(_send_customer_message, to_user, reply)
+        except Exception as exc:
+            _LOGGER.warning(
+                "WeChat reply failed: reason=worker_error error_type=%s record_id=%d",
+                type(exc).__name__,
+                record_id,
+            )
+            sent = False
+        _set_message_result(record_id, reply, "accepted" if sent else "failed")
+        _LOGGER.info(
+            "WeChat reply task finished: status=%s record_id=%d duration_ms=%d",
+            "accepted" if sent else "failed",
+            record_id,
+            round((time.monotonic() - started_at) * 1000),
         )
-    except Exception as exc:
-        code, _, error_type = _rag_failure_details(exc, "rag_query_unexpected_error")
+    except asyncio.CancelledError:
         _LOGGER.warning(
-            "RAG response unavailable: code=%s error_type=%s",
-            code,
-            error_type,
+            "WeChat reply task cancelled: record_id=%d duration_ms=%d",
+            record_id,
+            round((time.monotonic() - started_at) * 1000),
         )
-        reply = _RAG_ERROR_REPLY
-    try:
-        sent = await asyncio.to_thread(_send_customer_message, to_user, reply)
-    except Exception:
-        _LOGGER.warning("WeChat reply failed: reason=worker_error")
-        sent = False
-    _set_message_result(record_id, reply, "accepted" if sent else "failed")
+        raise
+
+
 
 _DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN">
@@ -566,13 +620,20 @@ async def receive_callback(
 
     # Never log the URL, signature, OpenID, MsgId, or message content.
     known_types = {"text", "image", "voice", "video", "shortvideo", "location", "link", "event"}
-    _LOGGER.info("WeChat callback accepted: type=%s", msg_type if msg_type in known_types else "unknown")
+    _LOGGER.info(
+        "WeChat callback accepted: type=%s transport=%s",
+        msg_type if msg_type in known_types else "unknown",
+        "cloud" if cloud_push else "signed",
+    )
     if msg_type == "text":
         responder = getattr(app.state, "rag_responder", None)
         if responder is None:
+            _LOGGER.error("WeChat text callback rejected: reason=rag_not_ready")
             raise HTTPException(503, "RAG responder is not ready")
         record_id = _store_message(question, message_id)
-        if record_id is not None:
+        if record_id is None:
+            _LOGGER.warning("WeChat reply task skipped: reason=duplicate_message")
+        else:
             background_tasks.add_task(
                 _answer_then_send,
                 responder,
@@ -580,5 +641,5 @@ async def receive_callback(
                 from_user,
                 record_id,
             )
-
+            _LOGGER.info("WeChat reply task scheduled: record_id=%d", record_id)
     return PlainTextResponse("success", headers=_HEADERS)

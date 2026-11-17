@@ -65,7 +65,20 @@ Content-Type: application/json
 
 查询失败时返回 HTTP 502 和阶段码：`embedding_retrieval_failed`（embedding/向量检索）、`retrieval_filter_failed`（检索结果筛选）、`llm_synthesis_failed`（LLM 生成）、`answer_formatting_failed`（回答格式化）、`empty_llm_response`（模型返回空回答）、`citation_validation_failed`（引用校验）或 `query_setup_failed`（查询准备）。公众号文字回调的云日志也记录相同阶段码和异常类型；启动日志可见 `rag_configuration_invalid`、`rag_local_setup_failed`、`index_missing`、`index_load_failed` 或 `rag_initialization_failed`，未就绪时接口返回 503。响应只包含安全提示；日志不记录 provider 异常文本、URL 或凭据。客服 API 的 `errcode`（例如 `48001`）是独立的微信发送结果，需按账号能力和 API 授权另行排查。
 
-这些错误码需要部署包含该代码的新版镜像后才会生效；只改环境变量或重启旧版本不会更新错误提示。
+#### 公众号无回复时查看云端日志
+
+升级到含有链路日志的镜像后，按同一个 `record_id` 查看：`WeChat reply task scheduled` → `WeChat reply task started` → `RAG reply generation started` → `RAG reply generation completed` 或 `RAG response unavailable` → `WeChat reply send started` → 微信 API 结果 → `WeChat reply task finished`。耗时以毫秒记录。日志不会包含问题正文、OpenID、MsgId、回复内容、URL、Token 或 provider 原始异常。
+
+- 只有 `WeChat callback accepted`，没有 `reply task scheduled`：检查后续是否有 `duplicate_message` 或 `rag_not_ready`；若都没有，确认部署的是最新镜像。
+- 有 `scheduled`，没有 `task started`：后台任务未开始或进程在执行前退出；FastAPI `BackgroundTasks` 是进程内任务，实例重启/回收时不保证投递。
+- 有 `RAG reply generation started`，没有 `completed` 或 `RAG response unavailable`：查询仍在运行或进程退出；如果持续如此，记录该条 `record_id` 和日志时间段。
+- 有 `RAG response unavailable`：按 `code` 排查 RAG 阶段。
+- 有 `reply send started` 后出现 `errcode` 或 `api_request_error`：检查对应微信 API 错误码、`mode`（云托管开放接口服务或 access-token 直连）及云调用白名单/账号权限。
+- `WeChat customer message API accepted: errcode=0` 只表示接口接受发送请求，不保证用户手机端已收到。
+
+`reply task skipped: reason=duplicate_message` 表示相同微信消息 ID 已处理过；日志有意不输出该 ID。
+
+这些阶段码和回调链路日志需要部署包含该代码的新版镜像后才会生效；只改环境变量或重启旧版本不会更新诊断信息。
 
 ### 本地构建与回归检查
 
