@@ -91,6 +91,7 @@ from rag_poc.cli import (
     RAG_REQUEST_TIMEOUT_SECONDS,
     ApiConfig,
     PoCError,
+    RagStageError,
     RagResponder,
     _embedding_model,
     _llm_model,
@@ -653,6 +654,54 @@ class OfflineHelperTests(unittest.TestCase):
         self.assertEqual(sufficient.retrieve_calls, 1)
         self.assertEqual(sufficient.synthesize_calls, 1)
         self.assertEqual(sufficient.synthesized_nodes, sufficient.nodes[:1])
+
+    def test_retrieval_and_synthesis_errors_have_distinct_safe_stages(self):
+        secret_detail = "private endpoint and credential detail"
+
+        class RetrieveFailure:
+            def retrieve(self, _query):
+                raise RuntimeError(secret_detail)
+
+        with self.assertRaises(RagStageError) as retrieval_error:
+            synthesize_if_supported(RetrieveFailure(), object(), DEFAULT_MIN_SCORE)
+        self.assertEqual(retrieval_error.exception.code, "embedding_retrieval_failed")
+        self.assertEqual(retrieval_error.exception.cause_type, "RuntimeError")
+        self.assertNotIn(secret_detail, str(retrieval_error.exception))
+
+        class SynthesisFailure:
+            def retrieve(self, _query):
+                return [SimpleNamespace(score=0.9)]
+
+            def synthesize(self, _query, _nodes):
+                raise RuntimeError(secret_detail)
+
+        with self.assertRaises(RagStageError) as synthesis_error:
+            synthesize_if_supported(SynthesisFailure(), object(), DEFAULT_MIN_SCORE)
+        self.assertEqual(synthesis_error.exception.code, "llm_synthesis_failed")
+        self.assertEqual(synthesis_error.exception.cause_type, "RuntimeError")
+        self.assertNotIn(secret_detail, str(synthesis_error.exception))
+
+    def test_citation_errors_are_reported_as_citation_validation(self):
+        class Response:
+            source_nodes = []
+
+            def __str__(self):
+                return "synthetic answer"
+
+        responder = object.__new__(RagResponder)
+        responder.query_engine = object()
+        responder.min_score = DEFAULT_MIN_SCORE
+        responder.corpus_dir = Path("unused-corpus")
+        responder._query_lock = threading.Lock()
+        with patch("rag_poc.cli.synthesize_if_supported", return_value=Response()):
+            with patch(
+                "rag_poc.cli.citation_source_references",
+                side_effect=PoCError("citation source numbering mismatch"),
+            ):
+                with self.assertRaises(RagStageError) as caught:
+                    responder.answer("synthetic question")
+        self.assertEqual(caught.exception.code, "citation_validation_failed")
+        self.assertIn("numbering mismatch", str(caught.exception))
 
     def test_model_urls_are_removed_from_answer(self):
         answer = "详情见 [馆藏页面](https://example.org/page) 或 https://example.org/raw"

@@ -52,8 +52,13 @@ async def _lifespan(application: FastAPI):
         from rag_poc.cli import RagResponder
 
         application.state.rag_responder = RagResponder()
-    except Exception:
-        _LOGGER.error("RAG startup failed; text callbacks will be unavailable")
+    except Exception as exc:
+        code, _, error_type = _rag_failure_details(exc, "rag_initialization_failed")
+        _LOGGER.error(
+            "RAG startup failed: code=%s error_type=%s; text callbacks unavailable",
+            code,
+            error_type,
+        )
     yield
 
 
@@ -75,6 +80,15 @@ _ACCESS_TOKEN_LOCK = threading.Lock()
 _ACCESS_TOKEN: str | None = None
 _ACCESS_TOKEN_EXPIRES_AT = 0.0
 _MESSAGE_LOCK = threading.Lock()
+
+
+def _rag_failure_details(exc: Exception, fallback_code: str) -> tuple[str, str, str]:
+    code = getattr(exc, "code", None)
+    message = getattr(exc, "public_message", None)
+    cause_type = getattr(exc, "cause_type", None)
+    if isinstance(code, str) and isinstance(message, str):
+        return code, message, cause_type or type(exc).__name__
+    return fallback_code, "RAG 查询遇到未分类错误。", type(exc).__name__
 
 
 def _truncate_utf8(text: str, byte_limit: int) -> str:
@@ -272,8 +286,13 @@ async def _answer_then_send(
         reply = _limit_customer_message(
             await asyncio.to_thread(responder.answer, question)
         )
-    except Exception:
-        _LOGGER.warning("RAG response unavailable: reason=query_error")
+    except Exception as exc:
+        code, _, error_type = _rag_failure_details(exc, "rag_query_unexpected_error")
+        _LOGGER.warning(
+            "RAG response unavailable: code=%s error_type=%s",
+            code,
+            error_type,
+        )
         reply = _RAG_ERROR_REPLY
     try:
         sent = await asyncio.to_thread(_send_customer_message, to_user, reply)
@@ -499,9 +518,19 @@ async def debug_rag_query(request: Request) -> JSONResponse:
         raise HTTPException(503, "RAG responder is not ready")
     try:
         answer = await asyncio.to_thread(responder.answer, question)
-    except Exception:
-        _LOGGER.warning("RAG debug query failed: reason=query_error")
-        raise HTTPException(502, "RAG query failed") from None
+    except Exception as exc:
+        code, message, error_type = _rag_failure_details(
+            exc, "rag_query_unexpected_error"
+        )
+        _LOGGER.warning(
+            "RAG debug query failed: code=%s error_type=%s",
+            code,
+            error_type,
+        )
+        raise HTTPException(
+            502,
+            {"code": code, "message": message},
+        ) from None
     return JSONResponse({"answer": answer}, headers=_HEADERS)
 
 

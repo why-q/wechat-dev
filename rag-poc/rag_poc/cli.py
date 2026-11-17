@@ -34,6 +34,22 @@ class PoCError(Exception):
     """Expected user-facing PoC errors, without provider details."""
 
 
+class RagStageError(PoCError):
+    """Safe operator-facing query failure with a stable stage code."""
+
+    def __init__(
+        self,
+        code: str,
+        public_message: str,
+        *,
+        cause: Exception | None = None,
+    ) -> None:
+        self.code = code
+        self.public_message = public_message
+        self.cause_type = type(cause).__name__ if cause is not None else None
+        super().__init__(f"[{code}] {public_message}")
+
+
 def configure_nltk_data_cache(cache_dir: Path | None = None) -> None:
     if cache_dir is None:
         cache_dir = Path(os.environ.get("RAG_NLTK_DATA_DIR", DEFAULT_NLTK_DATA_DIR))
@@ -224,11 +240,32 @@ def qualifying_sources(source_nodes: Sequence[object], min_score: float) -> list
 
 
 def synthesize_if_supported(query_engine, query_bundle, min_score: float):
-    retrieved = query_engine.retrieve(query_bundle)
-    selected = qualifying_sources(retrieved, min_score)
+    try:
+        retrieved = query_engine.retrieve(query_bundle)
+    except Exception as exc:
+        raise RagStageError(
+            "embedding_retrieval_failed",
+            "Embedding/向量检索阶段失败；检查 embedding API 与索引兼容性。",
+            cause=exc,
+        ) from None
+    try:
+        selected = qualifying_sources(retrieved, min_score)
+    except Exception as exc:
+        raise RagStageError(
+            "retrieval_filter_failed",
+            "检索结果筛选阶段失败；检查索引返回的相似度数据。",
+            cause=exc,
+        ) from None
     if not selected:
         return None
-    return query_engine.synthesize(query_bundle, selected)
+    try:
+        return query_engine.synthesize(query_bundle, selected)
+    except Exception as exc:
+        raise RagStageError(
+            "llm_synthesis_failed",
+            "LLM 回答生成阶段失败；检查 chat API 配置、模型与服务状态。",
+            cause=exc,
+        ) from None
 
 
 def source_reference(number: int, metadata: Mapping[str, object], corpus_dir: Path) -> str:
@@ -489,8 +526,9 @@ def build_index(
 
 def load_index(index_dir: Path, embedding_model):
     if not index_dir.is_dir() or not any(index_dir.iterdir()):
-        raise PoCError(
-            f"索引不存在：{index_dir}。请先运行 index 命令生成本地索引。"
+        raise RagStageError(
+            "index_missing",
+            f"索引不存在：{index_dir}。请先运行 index 命令生成本地索引。",
         )
     try:
         from llama_index.core import StorageContext, load_index_from_storage
@@ -500,9 +538,11 @@ def load_index(index_dir: Path, embedding_model):
             storage_context,
             embed_model=embedding_model,
         )
-    except Exception:
-        raise PoCError(
-            f"索引无法读取或不完整：{index_dir}。请重新运行 index 命令；未显示底层异常。"
+    except Exception as exc:
+        raise RagStageError(
+            "index_load_failed",
+            f"索引无法读取或不完整：{index_dir}。请检查索引文件和 embedding 模型。",
+            cause=exc,
         ) from None
 
 
@@ -527,8 +567,22 @@ class RagResponder:
         )
         self.min_score = min_score
         self._query_lock = threading.Lock()
-        config = load_api_config(os.environ, require_llm=True)
-        configure_nltk_data_cache()
+        try:
+            config = load_api_config(os.environ, require_llm=True)
+        except PoCError as exc:
+            raise RagStageError(
+                "rag_configuration_invalid",
+                str(exc),
+                cause=exc,
+            ) from None
+        try:
+            configure_nltk_data_cache()
+        except Exception as exc:
+            raise RagStageError(
+                "rag_local_setup_failed",
+                "RAG 本地运行环境准备失败；检查分词资源缓存和文件权限。",
+                cause=exc,
+            ) from None
         try:
             from llama_index.core import Settings
             from llama_index.core.prompts import PromptTemplate
@@ -569,9 +623,11 @@ class RagResponder:
             )
         except PoCError:
             raise
-        except Exception:
-            raise PoCError(
-                "RAG 服务初始化失败（索引或本地依赖不可用）；未显示底层异常。"
+        except Exception as exc:
+            raise RagStageError(
+                "rag_initialization_failed",
+                "RAG 初始化失败；检查依赖、索引和配置。",
+                cause=exc,
             ) from None
 
     def answer(self, question: str) -> str:
@@ -579,26 +635,59 @@ class RagResponder:
             raise PoCError("问题不能为空。")
         try:
             from llama_index.core.schema import QueryBundle
+        except Exception as exc:
+            raise RagStageError(
+                "query_setup_failed",
+                "查询运行时准备失败；检查 LlamaIndex 依赖。",
+                cause=exc,
+            ) from None
 
-            with self._query_lock:
-                response = synthesize_if_supported(
-                    self.query_engine, QueryBundle(question), self.min_score
-                )
-            if response is None:
-                return ABSTENTION_TEXT
+        try:
+            query_bundle = QueryBundle(question)
+        except Exception as exc:
+            raise RagStageError(
+                "query_setup_failed",
+                "查询参数准备失败。",
+                cause=exc,
+            ) from None
+
+        with self._query_lock:
+            response = synthesize_if_supported(
+                self.query_engine, query_bundle, self.min_score
+            )
+        if response is None:
+            return ABSTENTION_TEXT
+
+        try:
             answer = strip_model_links(str(response).strip())
-            if not answer:
-                raise PoCError("LLM 返回空回答；没有可显示的答案。")
+        except Exception as exc:
+            raise RagStageError(
+                "answer_formatting_failed",
+                "回答格式化阶段失败。",
+                cause=exc,
+            ) from None
+        if not answer:
+            raise RagStageError(
+                "empty_llm_response", "LLM 返回空回答；没有可显示的答案。"
+            )
+
+        try:
             references = citation_source_references(
                 getattr(response, "source_nodes", None), self.corpus_dir
             )
-            return answer + "\n\n可核对来源：\n" + "\n".join(references)
-        except PoCError:
-            raise
-        except Exception:
-            raise PoCError(
-                "查询失败（embedding/LLM API 请求失败，或索引不可用）。未显示底层异常或 endpoint。"
+        except PoCError as exc:
+            raise RagStageError(
+                "citation_validation_failed",
+                str(exc),
+                cause=exc,
             ) from None
+        except Exception as exc:
+            raise RagStageError(
+                "citation_validation_failed",
+                "引用校验阶段发生内部错误；拒绝输出无法核对的回答。",
+                cause=exc,
+            ) from None
+        return answer + "\n\n可核对来源：\n" + "\n".join(references)
 
 
 def query_index(

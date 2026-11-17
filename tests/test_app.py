@@ -297,11 +297,14 @@ class CallbackDashboardTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 503)
         self.assertEqual(json.loads(self.client.request("GET", "/messages").text), [])
-    def test_rag_failure_sends_generic_message_without_leaking_provider_error(self):
+    def test_rag_stage_failure_logs_safe_code_without_leaking_provider_error(self):
+        class StageFailure(Exception):
+            code = "llm_synthesis_failed"
+            public_message = "LLM 回答生成阶段失败；检查配置。"
+
         class FailingResponder:
             def answer(self, question):
-                raise RuntimeError("private provider detail")
-
+                raise StageFailure("private provider detail")
         wechat_app.app.state.rag_responder = FailingResponder()
         body = _message_xml("text", text="合成问题", message_id="rag-error")
         with self.assertLogs("uvicorn.error", level="WARNING") as captured:
@@ -313,7 +316,10 @@ class CallbackDashboardTests(unittest.TestCase):
         send.assert_called_once_with(
             "reader-id-not-for-display", wechat_app._RAG_ERROR_REPLY
         )
-        self.assertNotIn("private provider detail", "\n".join(captured.output))
+        logged = "\n".join(captured.output)
+        self.assertIn("code=llm_synthesis_failed", logged)
+        self.assertIn("error_type=StageFailure", logged)
+        self.assertNotIn("private provider detail", logged)
         message = json.loads(self.client.request("GET", "/messages").text)[0]
         self.assertEqual(message["reply"], wechat_app._RAG_ERROR_REPLY)
         self.assertEqual(message["reply_status"], "failed")
@@ -362,10 +368,15 @@ class CallbackDashboardTests(unittest.TestCase):
             self.assertEqual(oversized.status_code, 413)
         self.assertEqual(questions, ["合成问题：开放时间是什么？"])
 
-    def test_rag_debug_endpoint_hides_provider_errors(self):
+    def test_rag_debug_endpoint_returns_safe_stage_error_details(self):
+        class StageFailure(Exception):
+            code = "llm_synthesis_failed"
+            public_message = "LLM 回答生成阶段失败；检查 chat API 配置、模型与服务状态。"
+            cause_type = "AuthenticationError"
+
         class FailingResponder:
             def answer(self, question):
-                raise RuntimeError("private provider detail")
+                raise StageFailure("private provider endpoint and credential")
 
         wechat_app.app.state.rag_responder = FailingResponder()
         body = json.dumps({"question": "合成问题"}, ensure_ascii=False).encode()
@@ -380,10 +391,19 @@ class CallbackDashboardTests(unittest.TestCase):
 
         log_output = "\n".join(captured.output)
         self.assertEqual(response.status_code, 502)
-        self.assertEqual(json.loads(response.text), {"detail": "RAG query failed"})
-        self.assertIn("reason=query_error", log_output)
-        self.assertNotIn("private provider detail", response.text)
-        self.assertNotIn("private provider detail", log_output)
+        self.assertEqual(
+            json.loads(response.text),
+            {
+                "detail": {
+                    "code": "llm_synthesis_failed",
+                    "message": "LLM 回答生成阶段失败；检查 chat API 配置、模型与服务状态。",
+                }
+            },
+        )
+        self.assertIn("code=llm_synthesis_failed", log_output)
+        self.assertIn("error_type=AuthenticationError", log_output)
+        self.assertNotIn("private provider endpoint and credential", response.text)
+        self.assertNotIn("private provider endpoint and credential", log_output)
 
     def test_customer_message_uses_official_json_and_caches_access_token(self):
         requests = []

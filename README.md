@@ -63,6 +63,10 @@ Content-Type: application/json
 
 成功时返回 `{"answer":"..."}`，包含 RAG 回答和来源；该接口直接查询 RAG，不调用客服消息 API，也不把问题或答案写入应用的本地消息看板。问题上限 2000 字符；查询会访问远程 provider 并可能产生费用。调试完成后移除 `RAG_DEBUG_TOKEN` 并重启服务，使接口回到 404。若面板不支持自定义 `Authorization` 请求头，可在 WebShell 中对 `http://127.0.0.1:<端口>/debug/rag/query` 发送相同请求。
 
+查询失败时返回 HTTP 502 和阶段码：`embedding_retrieval_failed`（embedding/向量检索）、`retrieval_filter_failed`（检索结果筛选）、`llm_synthesis_failed`（LLM 生成）、`answer_formatting_failed`（回答格式化）、`empty_llm_response`（模型返回空回答）、`citation_validation_failed`（引用校验）或 `query_setup_failed`（查询准备）。公众号文字回调的云日志也记录相同阶段码和异常类型；启动日志可见 `rag_configuration_invalid`、`rag_local_setup_failed`、`index_missing`、`index_load_failed` 或 `rag_initialization_failed`，未就绪时接口返回 503。响应只包含安全提示；日志不记录 provider 异常文本、URL 或凭据。客服 API 的 `errcode`（例如 `48001`）是独立的微信发送结果，需按账号能力和 API 授权另行排查。
+
+这些错误码需要部署包含该代码的新版镜像后才会生效；只改环境变量或重启旧版本不会更新错误提示。
+
 ### 本地构建与回归检查
 
 本地构建和运行：
