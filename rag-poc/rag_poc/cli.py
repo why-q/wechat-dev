@@ -8,11 +8,13 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Mapping, Sequence
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_CORPUS_DIR = ROOT_DIR / "corpus"
@@ -708,6 +710,15 @@ def query_index(
 
 
 
+def _iso_date(value: str) -> date:
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise argparse.ArgumentTypeError("日期必须使用 YYYY-MM-DD 格式。")
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("请输入有效的 YYYY-MM-DD 日期。") from None
+
+
 def _positive_int(value: str) -> int:
     try:
         parsed = int(value)
@@ -752,13 +763,47 @@ def create_parser() -> argparse.ArgumentParser:
     query_parser.add_argument("--corpus", type=Path, default=DEFAULT_CORPUS_DIR)
     query_parser.add_argument("--top-k", type=_positive_int, default=DEFAULT_TOP_K)
     query_parser.add_argument("--min-score", type=float, default=DEFAULT_MIN_SCORE)
+    dataset_parser = subparsers.add_parser(
+        "dataset-sync", help="从 WeChat 历史 API 收集入站问题到本地 CSV"
+    )
+    dataset_parser.add_argument("--start-date", type=_iso_date, required=True)
+    dataset_parser.add_argument("--end-date", type=_iso_date, required=True)
+    dataset_parser.add_argument("--output-dir", type=Path, required=True)
+    dataset_parser.add_argument("--reset", action="store_true")
+
     return parser
+
+
+def _run_dataset_sync(args) -> int:
+    from .dataset_sync import CsvDatasetStore, DatasetSyncError, WeChatHistoryClient, sync_history
+
+    try:
+        client = WeChatHistoryClient.from_env(os.environ)
+        stats = sync_history(
+            client,
+            CsvDatasetStore(args.output_dir),
+            start_date=args.start_date,
+            end_date=args.end_date,
+            reset=args.reset,
+        )
+    except DatasetSyncError as exc:
+        print(f"rag-poc: {exc}", file=sys.stderr)
+        return 1
+    print(
+        f"dataset-sync: pages_fetched={stats.pages_fetched} "
+        f"inserted_rows={stats.inserted_rows}",
+        file=sys.stderr,
+    )
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     logging.disable(logging.CRITICAL)
     args = create_parser().parse_args(argv)
     load_dotenv(ROOT_DIR / ".env", override=False)
+    if args.command == "dataset-sync":
+        load_dotenv(ROOT_DIR.parent / ".env", override=False)
+        return _run_dataset_sync(args)
     try:
         if args.command == "check-config":
             check_config(live=args.live)
