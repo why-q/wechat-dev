@@ -164,6 +164,72 @@ class CallbackDashboardTests(unittest.TestCase):
         )
         self.assertEqual((response.status_code, response.text), (200, "success"))
 
+    def test_collection_mode_skips_rag_startup_and_signed_reply(self):
+        package = ModuleType("rag_poc")
+        package.__path__ = []
+        rag_module = ModuleType("rag_poc.cli")
+        constructor = patch.object(rag_module, "RagResponder", create=True)
+
+        async def start_lifespan():
+            async with wechat_app._lifespan(wechat_app.app):
+                self.assertIsNone(wechat_app.app.state.rag_responder)
+
+        with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+            with patch.dict(sys.modules, {"rag_poc": package, "rag_poc.cli": rag_module}):
+                with constructor as responder_constructor:
+                    asyncio.run(start_lifespan())
+                    responder_constructor.assert_not_called()
+            with patch.object(wechat_app, "_answer_then_send", new=AsyncMock()) as answer:
+                with patch.object(wechat_app, "_send_customer_message") as send:
+                    response = self.client.request(
+                        "POST",
+                        "/wechat",
+                        query=_signed_query(),
+                        body=_message_xml("text", text="开放时间？", message_id="dataset-1"),
+                    )
+        self.assertEqual((response.status_code, response.text), (200, "success"))
+        answer.assert_not_awaited()
+        send.assert_not_called()
+
+    def test_collection_mode_skips_cloud_reply_with_spy_responder(self):
+        responder = object()
+        body = json.dumps(
+            {
+                "ToUserName": "official-id",
+                "FromUserName": "reader-id",
+                "MsgType": "text",
+                "Content": "开放时间？",
+                "MsgId": "dataset-1",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+            wechat_app.app.state.rag_responder = responder
+            with patch.object(wechat_app.BackgroundTasks, "add_task") as add_task:
+                with patch.object(wechat_app, "_send_customer_message") as send:
+                    with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+                        response = self.client.request(
+                            "POST",
+                            "/wechat",
+                            body=body,
+                            headers={"x-wx-source": "cloudbase", "content-type": "application/json"},
+                        )
+        self.assertEqual((response.status_code, response.text), (200, "success"))
+        add_task.assert_not_called()
+        send.assert_not_called()
+
+    def test_collection_mode_hides_debug_query_even_with_token(self):
+        with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+            with patch.object(wechat_app, "_RAG_DEBUG_TOKEN", "test-debug-token"):
+                response = self.client.request(
+                    "POST",
+                    "/debug/rag/query",
+                    body=b'{"question":"ignored"}',
+                    headers={"authorization": "Bearer test-debug-token"},
+                )
+        self.assertEqual(response.status_code, 404)
+
+
     def test_cloud_path_check_accepts_json_without_signature(self):
         with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
             response = self.client.request(

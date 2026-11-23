@@ -34,6 +34,7 @@ _TOKEN = os.environ.get("WECHAT_TOKEN", "")
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
 _CLOUD_PUSH_ENABLED = _env_flag("WECHAT_CLOUD_PUSH_ENABLED", False)
+_AUTO_REPLY_ENABLED = _env_flag("WECHAT_AUTO_REPLY_ENABLED", True)
 _DASHBOARD_ENABLED = _env_flag("DASHBOARD_ENABLED", True)
 _WECHAT_OPEN_API_ENABLED = _env_flag("WECHAT_OPEN_API_ENABLED", False)
 _RAG_DEBUG_TOKEN = os.environ.get("RAG_DEBUG_TOKEN", "")
@@ -48,17 +49,18 @@ _HTTP_TIMEOUT_SECONDS = 5
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     application.state.rag_responder = None
-    try:
-        from rag_poc.cli import RagResponder
+    if _AUTO_REPLY_ENABLED:
+        try:
+            from rag_poc.cli import RagResponder
 
-        application.state.rag_responder = RagResponder()
-    except Exception as exc:
-        code, _, error_type = _rag_failure_details(exc, "rag_initialization_failed")
-        _LOGGER.error(
-            "RAG startup failed: code=%s error_type=%s; text callbacks unavailable",
-            code,
-            error_type,
-        )
+            application.state.rag_responder = RagResponder()
+        except Exception as exc:
+            code, _, error_type = _rag_failure_details(exc, "rag_initialization_failed")
+            _LOGGER.error(
+                "RAG startup failed: code=%s error_type=%s; text callbacks unavailable",
+                code,
+                error_type,
+            )
     yield
 
 
@@ -540,7 +542,7 @@ async def health() -> PlainTextResponse:
 
 @app.post("/debug/rag/query", response_class=JSONResponse)
 async def debug_rag_query(request: Request) -> JSONResponse:
-    if not _RAG_DEBUG_TOKEN:
+    if not _AUTO_REPLY_ENABLED or not _RAG_DEBUG_TOKEN:
         raise HTTPException(404, "not found")
     scheme, separator, supplied_token = request.headers.get("authorization", "").partition(" ")
     if (
@@ -626,6 +628,8 @@ async def receive_callback(
         "cloud" if cloud_push else "signed",
     )
     if msg_type == "text":
+        if not _AUTO_REPLY_ENABLED:
+            return PlainTextResponse("success", headers=_HEADERS)
         responder = getattr(app.state, "rag_responder", None)
         if responder is None:
             _LOGGER.error("WeChat text callback rejected: reason=rag_not_ready")

@@ -189,6 +189,31 @@ location = /wechat {
 
 这是 location 片段，不是完整的 HTTPS 配置，仅用于旧服务器回滚。本机 8000 不需要向公网开放。如果使用 Cloudflare 代理，旧回调地址不能出现登录、验证码或 JavaScript 挑战页，也不能缓存回调响应。
 
+## 微信历史问题采集（一次性 CLI）
+
+`dataset-sync` 直接通过官方 HTTPS `getmsglist` 查询客服历史，不能走云调用；账号必须是已认证的公众号/服务号并具备相应客服历史权限。请在出口 IP 已加入公众号 API 白名单的服务器运行，使用受保护的 shell 环境或权限为 `0600` 的外部 env 文件设置 `WECHAT_APP_ID`、`WECHAT_APP_SECRET` 和稳定生成的 `WECHAT_DATASET_HASH_KEY`。这些值不得写入仓库、命令历史、CSV 或日志。
+
+服务 mount namespace 中才会提供 `/srv/wechat-dev-test/rag_poc`；宿主机上的同名路径可能只是空目录。因此下面示例假定 standalone 包和虚拟环境确实已安装在 `/srv/wechat-dev-test`，并从该项目根目录运行。若使用仓库 checkout，请从 `rag-poc` 目录运行 `./.venv/bin/python -m rag_poc.cli dataset-sync`，并保留相同参数。这个初始窗口包含中国时区的“前 30 天至今天”（首尾包含）：
+
+```bash
+cd /srv/wechat-dev-test
+set -a; . /etc/wechat-dataset.env; set +a
+DATASET_START_DATE="$(TZ=Asia/Shanghai date -d '30 days ago' '+%F')"
+DATASET_END_DATE="$(TZ=Asia/Shanghai date '+%F')"
+/srv/wechat-dev-test/.venv/bin/python -m rag_poc.cli dataset-sync \
+  --start-date "$DATASET_START_DATE" \
+  --end-date "$DATASET_END_DATE" \
+  --output-dir /srv/wechat-dataset
+```
+
+输出目录在仓库外，包含 `questions.csv`、`sync-state.json` 和锁文件。重复运行同一窗口会按游标继续；失败或中断后应复用原先保存的两个日期参数，即使已经跨过午夜也不要重新计算日期。换日期范围时才使用 `--reset`，它保留 CSV 并依靠稳定 HMAC key 去重。游标按中国本地日和 `msgid` 推进：完整历史日进入下一日，当前日短页停在当前日的 `next_msgid=1`，稍后重跑可捕获新消息。
+
+清理时先把 canonical CSV 复制到 collector 管理目录之外的受保护位置，绝不直接编辑 canonical 文件。用表格软件导入副本时，明确将 `question` 列指定为**文本**（不要直接双击 CSV），避免读者问题开头的 `=` 被当作公式。清理副本中移除 `record_key`，也不含 OpenID。
+
+采集期间主 API 使用 `WECHAT_AUTO_REPLY_ENABLED=false` 且保持公网访问关闭：合法云推送或签名回调仍返回 `200 success`，但不会初始化 RAG、回答、排队任务或外呼。授权的实时跟进消息需在该模式下再次运行当前中国日采集验证；完成后仅在需要恢复原有 RAG 路径时将开关改回 `true`。
+
+真实验证前须确认目标服务器已获授权、出口 IP 已加入微信 API 白名单、账号客服历史能力已开通，并已在受保护环境中设置稳定 hash key。这些是运行前置条件，需由运维核实。
+
 ## 验证顺序
 
 ### 云托管消息推送
