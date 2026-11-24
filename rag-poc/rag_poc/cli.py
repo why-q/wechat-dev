@@ -787,7 +787,8 @@ def _run_dataset_sync(args) -> int:
             reset=args.reset,
         )
     except DatasetSyncError as exc:
-        print(f"rag-poc: {exc}", file=sys.stderr)
+        errcode = f" wechat_errcode={exc.api_errcode}" if exc.api_errcode is not None else ""
+        print(f"rag-poc: {exc}{errcode}", file=sys.stderr)
         return 1
     print(
         f"dataset-sync: pages_fetched={stats.pages_fetched} "

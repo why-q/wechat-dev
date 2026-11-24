@@ -1,0 +1,24 @@
+[Unit]
+Description=Collect completed WeChat question history for one China-local day
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/Work/wechat_dev_test/rag-poc
+Environment=HOME=/root
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/root/Work/wechat_dev_test/.env
+EnvironmentFile=-/root/Work/wechat_dev_test/rag-poc/.env
+ExecStart=/root/Work/wechat_dev_test/rag-poc/scripts/dataset-sync-daily
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/root/wechat-dataset
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

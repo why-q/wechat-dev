@@ -1,0 +1,145 @@
+#!/bin/sh
+# Collect completed China-local days into the existing private CSV.
+# One day per invocation of dataset-sync, with --reset only when the saved
+# range differs. A 45011 failure keeps the committed cursor and retries the
+# same dates without --reset. No credentials, message text, or hash key.
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+key_file=${WECHAT_DATASET_KEY_FILE:-"$HOME/.wechat-dataset.env"}
+output_dir=${WECHAT_DATASET_DIR:-"$HOME/wechat-dataset"}
+python=${WECHAT_DATASET_PYTHON:-"$repo/.venv/bin/python"}
+log_file=$output_dir/collection-log.jsonl
+
+if [ ! -f "$key_file" ]; then
+    echo "dataset-sync-daily: hash key file is missing" >&2
+    exit 1
+fi
+key_mode=$(stat -c '%a' "$key_file")
+case $key_mode in
+    600|400) ;;
+    *)
+        echo "dataset-sync-daily: hash key file is not private" >&2
+        exit 1
+        ;;
+esac
+
+set -a
+# shellcheck disable=SC1090
+. "$key_file"
+set +a
+cd "$repo"
+
+mkdir -p "$output_dir"
+chmod 700 "$output_dir"
+touch "$log_file"
+chmod 600 "$log_file"
+
+yesterday=$(TZ=Asia/Shanghai date -d 'yesterday' '+%F')
+start=$yesterday
+if [ -s "$log_file" ]; then
+    start=$(
+        WECHAT_DATASET_LOG="$log_file" WECHAT_DATASET_YESTERDAY="$yesterday" \
+            "$python" - <<'PY'
+import json
+import os
+from datetime import date, timedelta
+
+yesterday = date.fromisoformat(os.environ["WECHAT_DATASET_YESTERDAY"])
+last = None
+with open(os.environ["WECHAT_DATASET_LOG"], encoding="utf-8") as stream:
+    for line in stream:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if row.get("exit_code") == 0 and row.get("end_date"):
+            last = date.fromisoformat(row["end_date"])
+earliest = yesterday - timedelta(days=30)
+start = last + timedelta(days=1) if last is not None else yesterday
+print(max(start, earliest).isoformat())
+PY
+    )
+fi
+
+if [ "$start" \> "$yesterday" ]; then
+    echo "dataset-sync-daily: no completed day is pending" >&2
+    exit 0
+fi
+
+cursor_range() {
+    WECHAT_DATASET_DIR="$output_dir" "$python" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["WECHAT_DATASET_DIR"]) / "sync-state.json"
+try:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    print(f"{state['range_start_date']} {state['range_end_date']}")
+except (OSError, ValueError, KeyError, TypeError):
+    print("absent absent")
+PY
+}
+
+run_day() {
+    day=$1
+    attempt=0
+    while [ "$attempt" -lt 5 ]; do
+        attempt=$((attempt + 1))
+        set -- dataset-sync --start-date "$day" --end-date "$day" --output-dir "$output_dir"
+        range=$(cursor_range)
+        if [ "$range" != "$day $day" ]; then
+            set -- "$@" --reset
+        fi
+        set +e
+        output=$("$python" -m rag_poc.cli "$@" 2>&1 >/dev/null)
+        set -e
+        printf '%s\n' "$output" >&2
+        WECHAT_DATASET_LOG="$log_file" \
+        WECHAT_DATASET_DAY="$day" \
+        WECHAT_DATASET_STATUS="$status" \
+        WECHAT_DATASET_OUTPUT="$output" \
+            "$python" - <<'PY'
+import json
+import os
+import re
+from datetime import datetime, timezone
+
+output = os.environ["WECHAT_DATASET_OUTPUT"]
+match = re.search(r"wechat_errcode=(-?\d+)", output)
+inserted = re.search(r"inserted_rows=(\d+)", output)
+row = {
+    "at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "start_date": os.environ["WECHAT_DATASET_DAY"],
+    "end_date": os.environ["WECHAT_DATASET_DAY"],
+    "exit_code": int(os.environ["WECHAT_DATASET_STATUS"]),
+    "wechat_errcode": int(match.group(1)) if match else None,
+    "inserted_rows": int(inserted.group(1)) if inserted else None,
+}
+with open(os.environ["WECHAT_DATASET_LOG"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(row, sort_keys=True) + "\n")
+PY
+        if [ "$status" -eq 0 ]; then
+            return 0
+        fi
+        case $output in
+            *wechat_errcode=45011*)
+                echo "dataset-sync-daily: minute quota reached; waiting 60 seconds" >&2
+                sleep 60
+                ;;
+            *)
+                return "$status"
+                ;;
+        esac
+    done
+    echo "dataset-sync-daily: minute quota remained exhausted" >&2
+    return 1
+}
+
+current=$start
+while [ "$current" \< "$yesterday" ] || [ "$current" = "$yesterday" ]; do
+    run_day "$current"
+    sleep 10
+    current=$(TZ=Asia/Shanghai date -d "$current + 1 day" '+%F')
+done
+echo "dataset-sync-daily: collected $start through $yesterday" >&2

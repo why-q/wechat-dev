@@ -563,6 +563,20 @@ class DatasetCliTests(unittest.TestCase):
                         ["dataset-sync", "--start-date", value, "--end-date", "2026-11-23", "--output-dir", "/tmp/private"]
                     )
 
+    def test_api_error_prints_wechat_errcode_without_payload(self):
+        with patch.dict(os.environ, {"WECHAT_APP_ID": "id", "WECHAT_APP_SECRET": "secret"}, clear=True), patch(
+            "rag_poc.cli.load_dotenv"
+        ), patch("rag_poc.dataset_sync.sync_history", side_effect=DatasetSyncError(
+            "wechat_api_error", "The WeChat API rejected the request.", api_errcode=45011
+        )), contextlib.redirect_stdout(io.StringIO()) as stdout, contextlib.redirect_stderr(
+            io.StringIO()
+        ) as stderr:
+            status = cli.main(["dataset-sync", "--start-date", "2026-11-23", "--end-date", "2026-11-23", "--output-dir", "/tmp/private"])
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("wechat_errcode=45011", stderr.getvalue())
+        self.assertNotIn("secret", stderr.getvalue())
+
     def test_main_collects_and_reruns_without_duplicate_rows(self):
         record = {
             "openid": "test-openid-only-in-memory",

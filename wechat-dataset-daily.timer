@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect each completed China-local day of WeChat questions
+
+[Timer]
+OnCalendar=*-*-* 00:10:00 Asia/Shanghai
+Persistent=true
+AccuracySec=1min
+Unit=wechat-dataset-daily.service
+
+[Install]
+WantedBy=timers.target
