@@ -1,5 +1,7 @@
 # RAG dataset and testing plan
 
+The four-document RAG baseline is kept for reproducibility. The broader customer support pilot reuses this document's corpus manifest, evaluation split, redaction, and intake contracts. It adds `emergency` to `expected_action` and ordered `turns` for multi-message cases. Its release gates and channel modes are defined in the [customer support design](LIBRARY-SUPPORT-DESIGN.md). The thresholds below retain their original scope as diagnostic gates for the initial RAG baseline.
+
 ## Recommendation
 
 Start with a hand-labeled set and the existing LlamaIndex PoC. Use Baserow as the browser editor if library staff want a shared review queue. A UTF-8 CSV edited in a local spreadsheet is enough for the first round and uses the same columns. Export reviewed cases to versioned JSONL so a run can be repeated against the same questions and document versions. The listener adds candidate questions after the baseline exists. The library's public documents remain the source of answer evidence.
