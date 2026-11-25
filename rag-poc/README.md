@@ -89,6 +89,8 @@ index 命令在语料为空时以非零退出；配置缺失、索引不存在/�
 
 `dataset-sync` 是独立 CLI：它直接用 HTTPS 调用官方 `getmsglist`，不使用云调用，也不导入或初始化 RAG、回答问题、安排后台任务或发送客服消息。仅在已认证公众号/服务号具备客服历史权限、运行服务器出口 IP 已加入官方 API 白名单时使用。将 `WECHAT_APP_ID`、`WECHAT_APP_SECRET` 和长期不变的 `WECHAT_DATASET_HASH_KEY` 放在受保护 shell 或权限为 `0600` 的外部 env 文件；不要放入仓库、历史命令、CSV 或日志。
 
+账号管理员在「互动管理 → 私信」实测确认，本账号的私信需要收到回复才会出现在 `getmsglist` 的结果中。未回复的消息仍可在后台查看，`dataset-sync` 无法补采。[实测记录与采集检查点](../README.md#微信历史问题采集一次性-cli)
+
 服务 mount namespace 中才会提供 `/srv/wechat-dev-test/rag_poc`；宿主机上的同名路径可能只是空目录。因此下面示例假定 standalone 包和虚拟环境确实已安装在 `/srv/wechat-dev-test`，并从该项目根目录运行：
 
 ```bash
@@ -106,7 +108,7 @@ DATASET_END_DATE="$(TZ=Asia/Shanghai date '+%F')"
 
 清理必须先把 CSV 复制到 collector 管理目录之外的受保护位置，再编辑副本。副本导入表格软件时，将 `question` 列指定为文本（不要直接双击 CSV），避免以 `=` 开头的问题被当作公式；清理副本中移除 `record_key`，也不得加入 OpenID。
 
-采集期间主 API 设置 `WECHAT_AUTO_REPLY_ENABLED=false` 并关闭公网访问。合法签名或云推送文字回调仍为 HTTP `200 success`，但不会初始化 RAG、回答、排队或外呼；授权的实时跟进消息要在该模式下另行运行当前中国日采集确认。完成后仅在需要恢复原有 RAG 路径时将 `WECHAT_AUTO_REPLY_ENABLED` 改回 `true`。真实测试前须确认授权服务器、出口白名单、账号能力和已配置的 hash key；这些部署事实仍需运维核实，不能由文档代替。
+只接收回调时，主 API 设置 `WECHAT_AUTO_REPLY_ENABLED=false` 并关闭公网访问。合法签名或云推送文字回调仍返回 HTTP `200 success`，此模式会跳过 RAG 初始化、自动回复和外呼。仅在需要恢复原有 RAG 路径时将 `WECHAT_AUTO_REPLY_ENABLED` 改回 `true`。
 
 ## 测试
 
