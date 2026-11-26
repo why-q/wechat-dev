@@ -75,6 +75,7 @@
 - **Tier 1b `/v1/systemone` 路由**：[decision_client.py](support_backend/decision_client.py) 对接 `decision-model-preview`（站点 URL 自动规范拼接 `/v1/systemone`、2s 超时），单次返回 `route` 与 `preset_id`（含 `confidence` 阈值门控）；超时、报错或未配置时按设计直接降级进 Tier 2。
 - **Tier 2 仅 `0.` 资料分块与核对引用**：[knowledge.py](support_backend/knowledge.py) 仅收录 `0.` 前缀公开文档，提取 `source` 后剥离 YAML，采用 `MarkdownNodeParser` 生成小节并将当前标题追加到 `header_path` 末尾，超长小节按 `SentenceSplitter(paragraph_separator="\n\n", chunk_size=512, chunk_overlap=80)` 细分；实际建成 `rag-poc/index_v2`（`5` 份 `0.` 文档、`66` 个块，含完整 `source` 与 `header_path` 元数据，`.gitignore` 已忽略生成索引文件）。
 - **长短分流、单次澄清上限与待办兜底**：[responder.py](support_backend/responder.py) 配合 `SCHEMA_VERSION=3`（新增 `clarification_states` 与 `triage_runs`）将逻辑严密拆分为「可抢占取消的 `triage`」和「提交屏障后的 `apply_committed_plan`」，长答按「简短结论 + `具体请参考 {URL} 下的「{section_title}」节。`」输出，每个问题最多反问 `1` 次，需要人工跟进时先写 `staff_todo` 再发信；systemd 服务已切至 `rag-poc/.venv`、设置 `HOME=/var/lib/private/wechat-relay` 与 `AF_UNIX` 并隔离 `DynamicUser` NLTK 缓存，线上重启实测 `tier2_ready=true`、`presets=3`。详见 [Step 3 文档](docs/STEP3-TIER1-AND-TIER2-RAG.md)。
+- **2026-11-26 · 线上影子闭环校准**：真机实测验证了 `图书续借出问题了`（Tier 1 选 `public_qa+none` 进 Tier 2 追问）、`提示图书已逾期了，还能续借吗`（消耗澄清并引用 `0. 常见问题` 作答）与 `开馆时间？`（精确别名同秒直返）；同时观测到 3 次 `/v1/systemone` 真实调用耗时 `1407–1975 ms` 贴近 `2s` 上限，且常规提问「借来的书快到期了能延期几天呀」被过度澄清。据此把 `SUPPORT_DECISION_TIMEOUT_SECONDS` 默认值按实测校准为 `3.0s`，并收窄 `clarify` 判据仅在核心业务高度歧义时触发。
 
 ## Reference
 

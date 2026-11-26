@@ -12,7 +12,7 @@ from urllib.request import Request as URLRequest, urlopen
 
 
 DEFAULT_DECISION_MODEL = "decision-model-preview"
-DEFAULT_DECISION_TIMEOUT_SECONDS = 2.0
+DEFAULT_DECISION_TIMEOUT_SECONDS = 3.0
 
 
 class DecisionClientError(RuntimeError):

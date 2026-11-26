@@ -5,7 +5,7 @@
 接通 [图书馆智能客服设计](LIBRARY-SUPPORT-DESIGN.md) 完整自动问答决策链（紧接 Step 2 的 `Filter` 与 `Merge / Immediate` 调度）：
 
 1. **`1.` 固定答案 YAML 规范与整句精确匹配（Tier 1a）**：[presets.py](../support_backend/presets.py) 为 `1.*.md` 补充 `id`、`title`、`aliases`、`applicability` frontmatter；使用统一归一化（`NFKC`、首尾去空白、连续空白压成单空格、剥离句末标点与装饰符）整句精确匹配，命中且无别名冲突时直接返回正文（0 延迟、0 API 费用）。
-2. **`/v1/systemone` 决策模型路由（Tier 1b）**：[decision_client.py](../support_backend/decision_client.py) 对接 `decision-model-preview`（站点根地址规范化拼装 `/v1/systemone`，限时 `2.0s`），单次多题 `Choice` 同时判定 `route`（`public_qa` / `clarify` / `staff_action` / `unknown`）与 `preset_id`（对应 `1.` ID 或 `none`）。超时、报错或未配置时按设计自动降级进 Tier 2。
+2. **`/v1/systemone` 决策模型路由（Tier 1b）**：[decision_client.py](../support_backend/decision_client.py) 对接 `decision-model-preview`（站点根地址规范化拼装 `/v1/systemone`，按线上实测 `1407–1975 ms` 校准为默认 `3.0s` 超时），单次多题 `Choice` 同时判定 `route`（`public_qa` / `clarify` / `staff_action` / `unknown`）与 `preset_id`（对应 `1.` ID 或 `none`）。超时、报错或未配置时按设计自动降级进 Tier 2。
 3. **仅 `0.` 公开资料检索与核对引用（Tier 2）**：[knowledge.py](../support_backend/knowledge.py) 严格过滤 `corpus/` 下以 `0.` 开头的文档，提取并剥离 YAML frontmatter 中的 `source` URL，先按 `MarkdownNodeParser` 拆小节并将当前标题追加到祖先 `header_path` 末尾，再对超长小节用 `SentenceSplitter(paragraph_separator="\n\n", chunk_size=512, chunk_overlap=80)` 沿段落边界细分。
 4. **长度分流、单次澄清上限与兜底待办**：[responder.py](../support_backend/responder.py) 协同 [db.py](../support_backend/db.py)（`SCHEMA_VERSION=3` 新增 `clarification_states` 与 `triage_runs`）实现：
    - 短答直接返回，长答（`> SUPPORT_LONG_ANSWER_CHARS`，默认 `220`）先给简短结论再附 `具体请参考 {source_url} 下的「{section_title}」节。`（URL 与小节标题均取自可核对元数据，模型生成的链接一律剔除）；
@@ -29,7 +29,7 @@
 
 ## 环境变量一览
 
-- `SUPPORT_DECISION_BASE_URL` / `SUPPORT_DECISION_API_KEY` / `SUPPORT_DECISION_MODEL`（默认 `decision-model-preview`）/ `SUPPORT_DECISION_TIMEOUT_SECONDS`（默认 `2.0`）
+- `SUPPORT_DECISION_BASE_URL` / `SUPPORT_DECISION_API_KEY` / `SUPPORT_DECISION_MODEL`（默认 `decision-model-preview`）/ `SUPPORT_DECISION_TIMEOUT_SECONDS`（按线上实测耗时校准为默认 `3.0`）
 - `SUPPORT_CORPUS_DIR`（默认 `rag-poc/corpus`）、`SUPPORT_INDEX_DIR`（默认 `rag-poc/index_v2`，仅 `0.` 索引）
 - `SUPPORT_PRESET_MIN_CONFIDENCE`（默认 `0.65`）、`SUPPORT_LONG_ANSWER_CHARS`（默认 `220`）
 - `SUPPORT_TIER2_ENABLED`（默认 `true`）、`SUPPORT_TIER2_TOP_K`（默认 `4`）、`SUPPORT_TIER2_MIN_SCORE`（默认 `0.2`）
