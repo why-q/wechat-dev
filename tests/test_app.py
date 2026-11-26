@@ -10,7 +10,7 @@ import unittest
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 import xml.etree.ElementTree as ET
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 os.environ["WECHAT_TOKEN"] = "test-only-token"
@@ -666,6 +666,7 @@ class CallbackDashboardTests(unittest.TestCase):
         self.assertEqual(req.get_method(), "POST")
         self.assertEqual(timeout, 2.5)
         self.assertEqual(req.get_header("Authorization"), "Bearer relay-secret-token")
+        self.assertEqual(req.get_header("User-agent"), "WeChatRelay/1.0")
         forwarded = json.loads(req.data.decode("utf-8"))
         self.assertEqual(forwarded["schema_version"], 1)
         self.assertEqual(forwarded["transport"], "cloud")
@@ -880,6 +881,36 @@ class CallbackDashboardTests(unittest.TestCase):
                                 )
                         self.assertEqual((r2.status_code, r2.text), (200, "success"))
                         send_dup.assert_not_called()
+
+    def test_forward_url_error_logs_safe_reason_type_and_errno(self):
+        body = json.dumps(
+            {
+                "ToUserName": "official-id",
+                "FromUserName": "reader-id",
+                "MsgType": "text",
+                "Content": "hi",
+                "MsgId": "urlerr-1",
+            }
+        ).encode("utf-8")
+        err = URLError(ConnectionResetError(104, "Connection reset by peer https://secret.invalid"))
+        with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+            with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+                with patch.object(
+                    wechat_app, "_FORWARD_URL", "https://secret.invalid/relay/wechat"
+                ):
+                    with patch.object(wechat_app, "_FORWARD_FAIL_OPEN", True):
+                        with patch.object(wechat_app, "urlopen", side_effect=err):
+                            with self.assertLogs("uvicorn.error", level="WARNING") as captured:
+                                res = self.client.request(
+                                    "POST",
+                                    "/wechat",
+                                    body=body,
+                                    headers={"x-wx-source": "other"},
+                                )
+        self.assertEqual((res.status_code, res.text), (200, "success"))
+        logged = "\n".join(captured.output)
+        self.assertIn("error_type=URLError reason_type=ConnectionResetError errno=104", logged)
+        self.assertNotIn("secret.invalid", logged)
 
 
 if __name__ == "__main__":

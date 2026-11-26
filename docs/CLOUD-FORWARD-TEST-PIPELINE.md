@@ -29,7 +29,8 @@
    - `POST /relay/send-test`：需 Bearer 鉴权，传入 `{"seq": 2, "text": "..."}`（或 `to_user`），使用 `WECHAT_APP_ID` + `WECHAT_APP_SECRET` 直连 `https://api.weixin.qq.com/cgi-bin/message/custom/send`（含 `access_token` 缓存与 `40001` 单次刷新重试），返回 `errcode`、`errmsg` 与耗时。
 
 3. **Nginx HTTPS 与 systemd（[deploy/nginx-wechat-dev-test.conf](../deploy/nginx-wechat-dev-test.conf) · [wechat-relay.service](../wechat-relay.service)）**
-   - Nginx 在 `80` 与 `443 ssl`（使用 `/etc/ssl/nginx/cert.pem` 覆盖 `*.llink.cyou`）统一反代 `/healthz`、`/relay/wechat`、`/relay/events`、`/relay/send-test` 到 `127.0.0.1:8090`（同时兼容 Cloudflare Flexible 到源站 80 与 Full / Full (Strict) 到源站 443；生产建议在 Cloudflare 将 SSL/TLS 模式设为 Full (Strict) 以保证回源加密），并保留 `/wechat` 回滚入口。
+   - Nginx 在 `80` 与 `443 ssl`（使用 `/etc/ssl/nginx/cert.pem`——由 ZeroSSL 签发的公共受信任 `*.llink.cyou` 完整证书链）统一反代 `/healthz`、`/relay/wechat`、`/relay/events`、`/relay/send-test` 到 `127.0.0.1:8090`，并保留 `/wechat` 回滚入口。
+   - **Cloudflare 与出网说明**：若 `wechat-dev.llink.cyou` 开启 Cloudflare 橙云代理，实测中国大陆云托管容器出网访问 Cloudflare Anycast IP 会在握手阶段报 `URLError`（约 175ms），且 Cloudflare 默认以 `403` 拦截未显式指定 `User-Agent` 的 `Python-urllib` 请求（`app.py` 已补 `User-Agent: WeChatRelay/1.0` 及 `URLError` 的 `reason_type`/`errno` 安全诊断日志）。由于本机 Nginx 已自带公共受信任 ZeroSSL 证书，建议在 Cloudflare 将 `wechat-dev` DNS 记录改为 **DNS Only（灰云，仅解析不走 Cloudflare 代理）**，让云托管直连本机公网 IP 的 `443` TLS。
    - `wechat-relay.service` 使用 `DynamicUser=yes`、`StateDirectory=wechat-relay`，读取 `.env` 与可选 `/etc/wechat-relay.env`（格式须为 `RELAY_AUTH_TOKEN=...` 键值对），将数据保存在 `/var/lib/private/wechat-relay/relay-events.jsonl`。
 
 ## 验证操作步骤

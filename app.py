@@ -14,7 +14,7 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request as URLRequest, urlopen
 
@@ -683,6 +683,7 @@ def _forward_callback(envelope: dict[str, object]) -> tuple[bool, dict[str, obje
     headers = {
         "Content-Type": "application/json; charset=utf-8",
         "Accept": "application/json",
+        "User-Agent": "WeChatRelay/1.0",
     }
     if _FORWARD_TOKEN:
         headers["Authorization"] = f"Bearer {_FORWARD_TOKEN}"
@@ -697,6 +698,18 @@ def _forward_callback(envelope: dict[str, object]) -> tuple[bool, dict[str, obje
         _LOGGER.warning(
             "WeChat callback forward failed: status=%d error_type=HTTPError duration_ms=%d",
             exc.code,
+            duration_ms,
+        )
+        return False, None
+    except URLError as exc:
+        duration_ms = round((time.monotonic() - started_at) * 1000)
+        reason = exc.reason
+        reason_type = type(reason).__name__ if reason is not None else "unknown"
+        reason_errno = getattr(reason, "errno", None)
+        _LOGGER.warning(
+            "WeChat callback forward failed: status=none error_type=URLError reason_type=%s errno=%s duration_ms=%d",
+            reason_type,
+            reason_errno if type(reason_errno) is int else "-",
             duration_ms,
         )
         return False, None
