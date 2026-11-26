@@ -41,6 +41,14 @@
 
 客服设计提案：先按读者诉求选择已审核标准答案、一次澄清、人工入口或紧急指引。RAG 用新版语料进行离线对照，达到质量与覆盖门槛后按主题试点。通过运营看板跟踪答复、人工处理与知识缺口，馆员审核后将失败样本和修订内容纳入回归测试。提案含样本分析和首批待审答案。 [图书馆智能客服设计](docs/LIBRARY-SUPPORT-DESIGN.md)
 
+### 2026-11-26 · 客服流程讨论
+
+- `Feedback` 指读者主动提出的非紧急建议，直接展示在 Dashboard。`Emergency` 现阶段向读者提供联系方式，值班通知渠道待补充。
+- 自动问答无法给出可靠答复时使用 `Fallback` 模板。读者的预约一直报错、系统无法解答时，先回复 `Fallback` 模板，再生成馆员待办。
+- `0.xxx` 文档提供原始资料及 frontmatter 的 `source` 链接，`1.xxx` 文档存放整理后的固定答案。答复较长时先给简短结论，再附对应 `0.xxx` 文档的 `source` 链接。
+- `Build Database` 有两条路径。一条补充评测问题集，另一条收集工作人员反馈。
+- 微信云托管接收公众号消息并转发到自有服务器。后端业务处理、Dashboard 和 Database 均在自有服务器运行。
+
 ## Reference
 
 - [消息与事件推送介绍](https://developers.weixin.qq.com/doc/subscription/guide/dev/push/)
