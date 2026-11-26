@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import io
 import json
 import os
 import sys
@@ -9,6 +10,7 @@ import unittest
 from types import ModuleType
 from unittest.mock import AsyncMock, patch
 import xml.etree.ElementTree as ET
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 os.environ["WECHAT_TOKEN"] = "test-only-token"
@@ -606,6 +608,146 @@ class CallbackDashboardTests(unittest.TestCase):
         self.assertEqual(len(messages), 100)
         self.assertEqual(messages[0]["text"], "message 100")
         self.assertEqual(messages[-1]["text"], "message 1")
+
+    def test_cloud_callback_forwards_text_and_skips_rag_when_auto_reply_disabled(self):
+        captured_requests = []
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return b'{"ok":true}'
+
+        def fake_urlopen(req, timeout=None):
+            captured_requests.append((req, timeout))
+            return FakeResponse()
+
+        body = json.dumps(
+            {
+                "ToUserName": "official-id",
+                "FromUserName": "reader-open-id",
+                "CreateTime": 1792000123,
+                "MsgType": "text",
+                "Content": "请问图书馆几点闭馆？",
+                "MsgId": 1234567890,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        with self.assertLogs("uvicorn.error", level="INFO") as captured_logs:
+            with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+                with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+                    with patch.object(
+                        wechat_app, "_FORWARD_URL", "https://receiver.invalid/relay/wechat"
+                    ):
+                        with patch.object(wechat_app, "_FORWARD_TOKEN", "relay-secret-token"):
+                            with patch.object(wechat_app, "_FORWARD_TIMEOUT_SECONDS", 2.5):
+                                with patch.object(wechat_app, "urlopen", side_effect=fake_urlopen):
+                                    response = self.client.request(
+                                        "POST",
+                                        "/wechat",
+                                        body=body,
+                                        headers={
+                                            "x-wx-source": "cloudbase",
+                                            "x-wx-openid": "reader-open-id",
+                                            "content-type": "application/json",
+                                        },
+                                    )
+
+        self.assertEqual((response.status_code, response.text), (200, "success"))
+        self.assertEqual(len(captured_requests), 1)
+        req, timeout = captured_requests[0]
+        self.assertEqual(req.full_url, "https://receiver.invalid/relay/wechat")
+        self.assertEqual(req.get_method(), "POST")
+        self.assertEqual(timeout, 2.5)
+        self.assertEqual(req.get_header("Authorization"), "Bearer relay-secret-token")
+        forwarded = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(forwarded["schema_version"], 1)
+        self.assertEqual(forwarded["transport"], "cloud")
+        self.assertEqual(forwarded["msg_type"], "text")
+        self.assertEqual(forwarded["msg_id"], "1234567890")
+        self.assertEqual(forwarded["from_user"], "reader-open-id")
+        self.assertEqual(forwarded["to_user"], "official-id")
+        self.assertEqual(forwarded["create_time"], "1792000123")
+        self.assertEqual(forwarded["content"], "请问图书馆几点闭馆？")
+        self.assertEqual(
+            forwarded["wx_headers"],
+            {"x-wx-source": "cloudbase", "x-wx-openid": "reader-open-id"},
+        )
+        self.assertEqual(forwarded["raw_body"], body.decode("utf-8"))
+
+        logged = "\n".join(captured_logs.output)
+        self.assertIn("WeChat callback forward started: type=text transport=cloud", logged)
+        self.assertIn("WeChat callback forward succeeded: status=200", logged)
+        self.assertNotIn("relay-secret-token", logged)
+        self.assertNotIn("receiver.invalid", logged)
+        self.assertNotIn("reader-open-id", logged)
+        self.assertNotIn("请问图书馆几点闭馆？", logged)
+
+    def test_cloud_path_check_does_not_forward(self):
+        with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+            with patch.object(wechat_app, "_FORWARD_URL", "https://receiver.invalid/relay/wechat"):
+                with patch.object(wechat_app, "urlopen") as open_url:
+                    response = self.client.request(
+                        "POST",
+                        "/wechat",
+                        body=b'{"action":"CheckContainerPath"}',
+                        headers={"x-wx-source": "cloudbase"},
+                    )
+        self.assertEqual((response.status_code, response.text), (200, "success"))
+        open_url.assert_not_called()
+
+    def test_forward_failure_respects_fail_open_flag(self):
+        body = json.dumps(
+            {
+                "ToUserName": "official-id",
+                "FromUserName": "reader-id",
+                "MsgType": "event",
+                "Event": "subscribe",
+                "CreateTime": 1792000001,
+            }
+        ).encode("utf-8")
+        with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+            with patch.object(wechat_app, "_FORWARD_URL", "https://receiver.invalid/relay/wechat"):
+                with patch.object(wechat_app, "_FORWARD_FAIL_OPEN", True):
+                    with patch.object(wechat_app, "urlopen", side_effect=TimeoutError("timed out")):
+                        with self.assertLogs("uvicorn.error", level="WARNING") as captured:
+                            response = self.client.request(
+                                "POST",
+                                "/wechat",
+                                body=body,
+                                headers={"x-wx-source": "cloudbase"},
+                            )
+                self.assertEqual((response.status_code, response.text), (200, "success"))
+                self.assertIn("error_type=TimeoutError", "\n".join(captured.output))
+
+                http_error = HTTPError(
+                    "https://receiver.invalid/relay/wechat",
+                    500,
+                    "Internal Server Error",
+                    hdrs=None,
+                    fp=io.BytesIO(b""),
+                )
+                with patch.object(wechat_app, "_FORWARD_FAIL_OPEN", False):
+                    with patch.object(wechat_app, "urlopen", side_effect=http_error):
+                        strict_response = self.client.request(
+                            "POST",
+                            "/wechat",
+                            body=body,
+                            headers={"x-wx-source": "cloudbase"},
+                        )
+                self.assertEqual(strict_response.status_code, 502)
+
+    def test_validate_forward_url_rejects_invalid_scheme_or_credentials(self):
+        with self.assertRaises(RuntimeError):
+            wechat_app._validate_forward_url("ftp://example.com/relay")
+        with self.assertRaises(RuntimeError):
+            wechat_app._validate_forward_url("https://user:pass@example.com/relay")
 
 
 if __name__ == "__main__":

@@ -14,7 +14,8 @@ from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request as URLRequest, urlopen
 
 from defusedxml import ElementTree as SafeET
@@ -30,6 +31,29 @@ def _env_flag(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_float(name: str, default: float, *, min_value: float, max_value: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        parsed = float(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if parsed < min_value or parsed > max_value:
+        return max(min_value, min(max_value, parsed))
+    return parsed
+
+
+def _validate_forward_url(url: str) -> str:
+    cleaned = url.strip()
+    if not cleaned:
+        return ""
+    parsed = urlsplit(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        raise RuntimeError("WECHAT_FORWARD_URL must be a valid http or https URL without credentials")
+    return cleaned
+
+
 _TOKEN = os.environ.get("WECHAT_TOKEN", "")
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
@@ -38,6 +62,12 @@ _AUTO_REPLY_ENABLED = _env_flag("WECHAT_AUTO_REPLY_ENABLED", True)
 _DASHBOARD_ENABLED = _env_flag("DASHBOARD_ENABLED", True)
 _WECHAT_OPEN_API_ENABLED = _env_flag("WECHAT_OPEN_API_ENABLED", False)
 _RAG_DEBUG_TOKEN = os.environ.get("RAG_DEBUG_TOKEN", "")
+_FORWARD_URL = _validate_forward_url(os.environ.get("WECHAT_FORWARD_URL", ""))
+_FORWARD_TOKEN = os.environ.get("WECHAT_FORWARD_TOKEN", "")
+_FORWARD_TIMEOUT_SECONDS = _env_float(
+    "WECHAT_FORWARD_TIMEOUT_SECONDS", 3.0, min_value=0.2, max_value=4.5
+)
+_FORWARD_FAIL_OPEN = _env_flag("WECHAT_FORWARD_FAIL_OPEN", True)
 if not _TOKEN and not _CLOUD_PUSH_ENABLED:
     raise RuntimeError("WECHAT_TOKEN must be set unless Cloud Hosting push mode is enabled")
 
@@ -49,6 +79,13 @@ _HTTP_TIMEOUT_SECONDS = 5
 @asynccontextmanager
 async def _lifespan(application: FastAPI):
     application.state.rag_responder = None
+    if _FORWARD_URL:
+        _LOGGER.info(
+            "WeChat callback forwarder enabled: timeout_s=%.2f fail_open=%s has_token=%s",
+            _FORWARD_TIMEOUT_SECONDS,
+            str(_FORWARD_FAIL_OPEN).lower(),
+            str(bool(_FORWARD_TOKEN)).lower(),
+        )
     if _AUTO_REPLY_ENABLED:
         try:
             from rag_poc.cli import RagResponder
@@ -470,22 +507,55 @@ def _verify_signature(request: Request) -> None:
         raise HTTPException(400, "only plaintext messages are supported")
 
 
-def _parse_xml_callback(body: bytes) -> tuple[str, str, str, str | None]:
+@dataclass(frozen=True)
+class _ParsedCallback:
+    msg_type: str
+    content: str
+    from_user: str
+    message_id: str | None
+    to_user: str = ""
+    create_time: str = ""
+    event: str = ""
+
+    def summary_tuple(self) -> tuple[str, str, str, str | None]:
+        return (self.msg_type, self.content, self.from_user, self.message_id)
+
+
+def _scalar_text(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if type(value) is int:
+        return str(value)
+    return ""
+
+
+def _parse_xml_callback_fields(body: bytes, *, allow_check: bool) -> _ParsedCallback | None:
     try:
         message = SafeET.fromstring(body.decode("utf-8"), forbid_dtd=True)
     except (UnicodeDecodeError, ET.ParseError, DefusedXmlException, ValueError):
         raise HTTPException(400, "invalid XML") from None
     if message.tag != "xml" or message.find("Encrypt") is not None:
         raise HTTPException(400, "only plaintext XML messages are supported")
-    return (
-        message.findtext("MsgType", ""),
-        message.findtext("Content", ""),
-        message.findtext("FromUserName", ""),
-        message.findtext("MsgId"),
+    if allow_check and message.findtext("action") == "CheckContainerPath":
+        return None
+    return _ParsedCallback(
+        msg_type=message.findtext("MsgType", ""),
+        content=message.findtext("Content", ""),
+        from_user=message.findtext("FromUserName", ""),
+        message_id=message.findtext("MsgId"),
+        to_user=message.findtext("ToUserName", ""),
+        create_time=message.findtext("CreateTime", ""),
+        event=message.findtext("Event", ""),
     )
 
 
-def _parse_cloud_callback(body: bytes) -> tuple[str, str, str, str | None] | None:
+def _parse_xml_callback(body: bytes) -> tuple[str, str, str, str | None]:
+    parsed = _parse_xml_callback_fields(body, allow_check=False)
+    assert parsed is not None
+    return parsed.summary_tuple()
+
+
+def _parse_cloud_callback_fields(body: bytes) -> _ParsedCallback | None:
     if body.lstrip().startswith(b"{"):
         try:
             payload = json.loads(body.decode("utf-8"))
@@ -496,29 +566,125 @@ def _parse_cloud_callback(body: bytes) -> tuple[str, str, str, str | None] | Non
         if payload.get("action") == "CheckContainerPath":
             return None
         message_id = payload.get("MsgId")
-        if message_id is not None and not isinstance(message_id, (str, int)):
+        if message_id is not None and (type(message_id) is bool or not isinstance(message_id, (str, int))):
             raise HTTPException(400, "invalid message ID")
-        return (
-            payload.get("MsgType") if isinstance(payload.get("MsgType"), str) else "",
-            payload.get("Content") if isinstance(payload.get("Content"), str) else "",
-            payload.get("FromUserName") if isinstance(payload.get("FromUserName"), str) else "",
-            str(message_id) if message_id is not None else None,
+        return _ParsedCallback(
+            msg_type=payload.get("MsgType") if isinstance(payload.get("MsgType"), str) else "",
+            content=payload.get("Content") if isinstance(payload.get("Content"), str) else "",
+            from_user=payload.get("FromUserName") if isinstance(payload.get("FromUserName"), str) else "",
+            message_id=str(message_id) if message_id is not None else None,
+            to_user=payload.get("ToUserName") if isinstance(payload.get("ToUserName"), str) else "",
+            create_time=_scalar_text(payload.get("CreateTime")),
+            event=payload.get("Event") if isinstance(payload.get("Event"), str) else "",
         )
 
+    return _parse_xml_callback_fields(body, allow_check=True)
+
+
+def _parse_cloud_callback(body: bytes) -> tuple[str, str, str, str | None] | None:
+    parsed = _parse_cloud_callback_fields(body)
+    return parsed.summary_tuple() if parsed is not None else None
+
+
+_KNOWN_WECHAT_TYPES = {
+    "text",
+    "image",
+    "voice",
+    "video",
+    "shortvideo",
+    "location",
+    "link",
+    "event",
+}
+
+
+def _safe_msg_type(msg_type: str) -> str:
+    return msg_type if msg_type in _KNOWN_WECHAT_TYPES else "unknown"
+
+
+def _build_forward_envelope(
+    *,
+    raw_body: bytes,
+    parsed: _ParsedCallback,
+    cloud_push: bool,
+    request: Request,
+) -> dict[str, object]:
+    wx_headers: dict[str, str] = {}
+    for key, value in request.headers.items():
+        lowered = key.lower()
+        if lowered.startswith("x-wx-"):
+            wx_headers[lowered] = value[:512]
+            if len(wx_headers) >= 32:
+                break
+    return {
+        "schema_version": 1,
+        "transport": "cloud" if cloud_push else "signed",
+        "received_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "content_type": (request.headers.get("content-type") or "")[:128],
+        "msg_type": parsed.msg_type,
+        "msg_id": parsed.message_id,
+        "from_user": parsed.from_user,
+        "to_user": parsed.to_user,
+        "create_time": parsed.create_time,
+        "content": parsed.content,
+        "event": parsed.event,
+        "wx_headers": wx_headers,
+        "raw_body": raw_body.decode("utf-8", errors="replace"),
+    }
+
+
+def _forward_callback(envelope: dict[str, object]) -> bool:
+    target_url = _validate_forward_url(_FORWARD_URL)
+    if not target_url:
+        return True
+    safe_type = _safe_msg_type(str(envelope.get("msg_type", "")))
+    transport = "cloud" if envelope.get("transport") == "cloud" else "signed"
+    started_at = time.monotonic()
+    _LOGGER.info("WeChat callback forward started: type=%s transport=%s", safe_type, transport)
+
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "application/json",
+    }
+    if _FORWARD_TOKEN:
+        headers["Authorization"] = f"Bearer {_FORWARD_TOKEN}"
+    data = json.dumps(envelope, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    req = URLRequest(target_url, data=data, headers=headers, method="POST")
     try:
-        message = SafeET.fromstring(body.decode("utf-8"), forbid_dtd=True)
-    except (UnicodeDecodeError, ET.ParseError, DefusedXmlException, ValueError):
-        raise HTTPException(400, "invalid XML") from None
-    if message.tag != "xml" or message.find("Encrypt") is not None:
-        raise HTTPException(400, "only plaintext XML messages are supported")
-    if message.findtext("action") == "CheckContainerPath":
-        return None
-    return (
-        message.findtext("MsgType", ""),
-        message.findtext("Content", ""),
-        message.findtext("FromUserName", ""),
-        message.findtext("MsgId"),
+        with urlopen(req, timeout=_FORWARD_TIMEOUT_SECONDS) as response:
+            status = getattr(response, "status", 200)
+            response.read()
+    except HTTPError as exc:
+        duration_ms = round((time.monotonic() - started_at) * 1000)
+        _LOGGER.warning(
+            "WeChat callback forward failed: status=%d error_type=HTTPError duration_ms=%d",
+            exc.code,
+            duration_ms,
+        )
+        return False
+    except Exception as exc:
+        duration_ms = round((time.monotonic() - started_at) * 1000)
+        _LOGGER.warning(
+            "WeChat callback forward failed: status=none error_type=%s duration_ms=%d",
+            type(exc).__name__,
+            duration_ms,
+        )
+        return False
+
+    duration_ms = round((time.monotonic() - started_at) * 1000)
+    if not (200 <= status < 300):
+        _LOGGER.warning(
+            "WeChat callback forward failed: status=%d error_type=UnexpectedStatus duration_ms=%d",
+            status,
+            duration_ms,
+        )
+        return False
+    _LOGGER.info(
+        "WeChat callback forward succeeded: status=%d duration_ms=%d",
+        status,
+        duration_ms,
     )
+    return True
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -612,21 +778,32 @@ async def receive_callback(
             raise HTTPException(413, "message exceeds 256 KiB")
         body.extend(chunk)
 
+    raw_body = bytes(body)
     if cloud_push:
-        parsed = _parse_cloud_callback(bytes(body))
-        if parsed is None:
+        parsed_fields = _parse_cloud_callback_fields(raw_body)
+        if parsed_fields is None:
             return PlainTextResponse("success", headers=_HEADERS)
     else:
-        parsed = _parse_xml_callback(bytes(body))
-    msg_type, question, from_user, message_id = parsed
+        parsed_fields = _parse_xml_callback_fields(raw_body, allow_check=False)
+        assert parsed_fields is not None
+    msg_type, question, from_user, message_id = parsed_fields.summary_tuple()
 
     # Never log the URL, signature, OpenID, MsgId, or message content.
-    known_types = {"text", "image", "voice", "video", "shortvideo", "location", "link", "event"}
     _LOGGER.info(
         "WeChat callback accepted: type=%s transport=%s",
-        msg_type if msg_type in known_types else "unknown",
+        _safe_msg_type(msg_type),
         "cloud" if cloud_push else "signed",
     )
+    if _FORWARD_URL:
+        envelope = _build_forward_envelope(
+            raw_body=raw_body,
+            parsed=parsed_fields,
+            cloud_push=cloud_push,
+            request=request,
+        )
+        forwarded = await asyncio.to_thread(_forward_callback, envelope)
+        if not forwarded and not _FORWARD_FAIL_OPEN:
+            raise HTTPException(502, "callback forward failed")
     if msg_type == "text":
         if not _AUTO_REPLY_ENABLED:
             return PlainTextResponse("success", headers=_HEADERS)

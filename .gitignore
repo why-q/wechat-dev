@@ -31,6 +31,7 @@ htmlcov/
 
 # Local tools and generated artifacts
 .cache/
+data/
 *.log
 *.sqlite
 *.sqlite3

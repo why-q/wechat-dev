@@ -52,6 +52,11 @@
 - 馆员在微信公众号后台回复读者。自有服务器的 Dashboard 展示待办和处理结果，并支持记录结果。Dashboard 直接回复和自有服务器回发微信链路待确认。
 - 同一未结事项的后续消息追加到已有待办，由接手的馆员通过微信公众号后台回复并在 Dashboard 结案。公众号后台人工回复独立于服务号客服 API 发送额度。若后续 Dashboard 通过客服 API 发信，其消息与自动回复一起计入额度。
 
+### 2026-11-26 · 云托管转发测试管道
+
+- 第一步实现云托管到自有服务器的转发测试管道：`app.py` 新增 `WECHAT_FORWARD_URL`、`WECHAT_FORWARD_TOKEN`、`WECHAT_FORWARD_TIMEOUT_SECONDS`（默认 3.0s，上限 4.5s）和 `WECHAT_FORWARD_FAIL_OPEN`（默认 true），在 `CheckContainerPath` 之外的所有 `/wechat` 回调中同步转发（先于 `WECHAT_AUTO_REPLY_ENABLED` 提前返回，避免试测阶段依赖 RAG/LLM 凭据或触发错误自动回复）。
+- 自有服务器侧新增独立接收端 `relay_receiver.py`，强制要求 `RELAY_AUTH_TOKEN` Bearer 鉴权，提供 `/healthz`、`/relay/wechat` 与 `/relay/events`，并将收到的消息及 `x-wx-*` 头以 `0600` 权限持久化到 JSONL（默认 `data/relay-events.jsonl`，已加入 `.gitignore`）。具体操作见 [云托管转发测试管道](docs/CLOUD-FORWARD-TEST-PIPELINE.md)。
+
 ## Reference
 
 - [消息与事件推送介绍](https://developers.weixin.qq.com/doc/subscription/guide/dev/push/)
