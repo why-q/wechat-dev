@@ -1,0 +1,278 @@
+"""Asynchronous merge scheduler, Filter actions, and recovery pipeline."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import logging
+from typing import Any, Awaitable, Callable
+
+from .db import FlushOutcome, IngestResult, SupportStore
+from .filters import EMERGENCY_CONTACT_REPLY, FEEDBACK_RECEIVED_REPLY, classify_message
+
+SendTextFn = Callable[[str, str], dict[str, Any]]
+BatchFlushedHook = Callable[[FlushOutcome], Awaitable[None] | None]
+
+_LOGGER = logging.getLogger("uvicorn.error")
+
+
+def _safe_token(value: str) -> str:
+    return "".join(ch for ch in value if ch.isalnum() or ch in {"-", "_", ".", ":"})[:64]
+
+
+def _safe_errmsg(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = "".join(
+        ch if (ch.isascii() and (ch.isalnum() or ch in " .,:;-_/()")) else " " for ch in value
+    )
+    return " ".join(cleaned.split())[:96]
+
+
+class SupportPipeline:
+    """Coordinates Filter, 3s-quiet / 10s-max message merging, recovery, and async replies."""
+
+    def __init__(
+        self,
+        store: SupportStore,
+        *,
+        send_text_fn: SendTextFn | None = None,
+        auto_reply_enabled: bool = False,
+        on_batch_flushed: BatchFlushedHook | None = None,
+    ) -> None:
+        self.store = store
+        self.send_text_fn = send_text_fn
+        self.auto_reply_enabled = auto_reply_enabled
+        self.on_batch_flushed = on_batch_flushed
+
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._wakeup: asyncio.Event | None = None
+        self._stop_requested = False
+        self._scheduler_task: asyncio.Task[None] | None = None
+        self._flush_lock: asyncio.Lock | None = None
+
+    async def start(self) -> list[FlushOutcome]:
+        """Start the merge timer scheduler and immediately flush any past-due open batches."""
+        self._loop = asyncio.get_running_loop()
+        self._wakeup = asyncio.Event()
+        self._flush_lock = asyncio.Lock()
+        self._stop_requested = False
+
+        recovered = await self.flush_due_now()
+        self._scheduler_task = self._loop.create_task(self._scheduler_loop(), name="support-merge-scheduler")
+        next_deadline = self.store.next_open_deadline()
+        _LOGGER.info(
+            "Support pipeline started: recovered_batches=%d pending_open_deadline=%s auto_reply=%s",
+            len(recovered),
+            f"{next_deadline:.3f}" if next_deadline is not None else "-",
+            str(self.auto_reply_enabled).lower(),
+        )
+        return recovered
+
+    async def stop(self) -> None:
+        """Stop the background scheduler cleanly while leaving open batches persisted for restart."""
+        self._stop_requested = True
+        if self._wakeup is not None:
+            self._wakeup.set()
+        if self._scheduler_task is not None:
+            try:
+                await self._scheduler_task
+            except asyncio.CancelledError:
+                pass
+            self._scheduler_task = None
+        self._wakeup = None
+        self._loop = None
+
+    def notify_scheduler(self) -> None:
+        """Wake the merge scheduler on its running event loop when a deadline may have changed."""
+        if self._loop is None or self._wakeup is None or self._loop.is_closed():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is self._loop:
+            self._wakeup.set()
+        else:
+            self._loop.call_soon_threadsafe(self._wakeup.set)
+
+    def ingest_sync(self, payload: dict[str, Any], *, client_ip: str = "") -> IngestResult:
+        """Synchronously classify and commit one inbound payload to SQLite."""
+        msg_type = payload.get("msg_type") if isinstance(payload.get("msg_type"), str) else ""
+        content = payload.get("content") if isinstance(payload.get("content"), str) else ""
+        event = payload.get("event") if isinstance(payload.get("event"), str) else ""
+        decision = classify_message(msg_type=msg_type, content=content, event=event)
+        result = self.store.ingest_event(payload, decision, client_ip=client_ip)
+        _LOGGER.info(
+            "Support ingest persisted: seq=%d duplicate=%s category=%s reason=%s batch_id=%s count=%s",
+            result.seq,
+            str(result.duplicate).lower(),
+            result.filter_decision.category,
+            _safe_token(result.filter_decision.reason) or "-",
+            result.batch.batch_id if result.batch is not None else "-",
+            result.batch.message_count if result.batch is not None else "-",
+        )
+        return result
+
+    async def process_ingest_side_effects(self, result: IngestResult, payload: dict[str, Any]) -> None:
+        """Execute post-commit actions (contact/feedback replies, overdue pre-flushes, scheduler wakeup)."""
+        for pre in result.pre_flushed:
+            await self._handle_flushed_outcome(pre)
+
+        if result.duplicate:
+            return
+
+        category = result.filter_decision.category
+        account_id = payload.get("to_user") if isinstance(payload.get("to_user"), str) else "default"
+        reader_id = payload.get("from_user") if isinstance(payload.get("from_user"), str) else ""
+
+        if category == "emergency" and reader_id:
+            await self._deliver_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind="emergency",
+                trigger_ref_id=result.staff_case_id,
+                content=EMERGENCY_CONTACT_REPLY,
+            )
+        elif category == "feedback" and reader_id:
+            await self._deliver_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind="feedback",
+                trigger_ref_id=result.feedback_id,
+                content=FEEDBACK_RECEIVED_REPLY,
+            )
+        elif category == "question" and result.batch is not None:
+            self.notify_scheduler()
+
+    async def flush_due_now(self) -> list[FlushOutcome]:
+        """Flush all open batches whose deadline has arrived and run their downstream hooks."""
+        if self._flush_lock is None:
+            self._flush_lock = asyncio.Lock()
+        async with self._flush_lock:
+            outcomes = await asyncio.to_thread(self.store.flush_due_batches)
+            for outcome in outcomes:
+                await self._handle_flushed_outcome(outcome)
+            return outcomes
+
+    async def _scheduler_loop(self) -> None:
+        assert self._wakeup is not None
+        while not self._stop_requested:
+            try:
+                await self.flush_due_now()
+            except Exception as exc:
+                _LOGGER.warning("Support scheduler flush failed: reason=%s", type(exc).__name__)
+
+            if self._stop_requested:
+                break
+
+            next_deadline = self.store.next_open_deadline()
+            if next_deadline is None:
+                await self._wakeup.wait()
+                self._wakeup.clear()
+                continue
+
+            delay = max(0.0, next_deadline - self.store.now())
+            if delay == 0.0:
+                continue
+            try:
+                await asyncio.wait_for(self._wakeup.wait(), timeout=delay)
+                self._wakeup.clear()
+            except asyncio.TimeoutError:
+                pass
+
+    async def _handle_flushed_outcome(self, outcome: FlushOutcome) -> None:
+        _LOGGER.info(
+            "Support batch flushed: batch_id=%d count=%d route=%s case_id=%s reason=%s",
+            outcome.batch.batch_id,
+            outcome.batch.message_count,
+            outcome.route_stage,
+            outcome.staff_case_id if outcome.staff_case_id is not None else "-",
+            _safe_token(outcome.same_case_reason) or "-",
+        )
+        if outcome.route_stage == "ready_for_triage" and self.on_batch_flushed is not None:
+            try:
+                hook_result = self.on_batch_flushed(outcome)
+                if inspect.isawaitable(hook_result):
+                    await hook_result
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Support batch post-flush hook failed: batch_id=%d reason=%s",
+                    outcome.batch.batch_id,
+                    type(exc).__name__,
+                )
+
+    async def _deliver_reply(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        trigger_kind: str,
+        trigger_ref_id: int | None,
+        content: str,
+    ) -> int:
+        if not self.auto_reply_enabled or self.send_text_fn is None:
+            reply_id = self.store.record_outbound_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind=trigger_kind,
+                trigger_ref_id=trigger_ref_id,
+                content=content,
+                delivery_mode="shadow",
+                status="shadow",
+            )
+            _LOGGER.info(
+                "Support reply recorded in shadow mode: reply_id=%d trigger=%s ref_id=%s",
+                reply_id,
+                trigger_kind,
+                trigger_ref_id if trigger_ref_id is not None else "-",
+            )
+            return reply_id
+
+        try:
+            result = await asyncio.to_thread(self.send_text_fn, reader_id, content)
+        except Exception as exc:
+            reply_id = self.store.record_outbound_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind=trigger_kind,
+                trigger_ref_id=trigger_ref_id,
+                content=content,
+                delivery_mode="direct_https",
+                status="failed",
+                errmsg=type(exc).__name__,
+            )
+            _LOGGER.warning(
+                "Support reply failed: reply_id=%d trigger=%s reason=%s",
+                reply_id,
+                trigger_kind,
+                type(exc).__name__,
+            )
+            return reply_id
+
+        ok = bool(result.get("ok"))
+        errcode = result.get("errcode") if type(result.get("errcode")) is int else None
+        errmsg = _safe_errmsg(result.get("errmsg"))
+        duration_ms = result.get("duration_ms") if type(result.get("duration_ms")) is int else None
+        delivery_mode = result.get("mode") if isinstance(result.get("mode"), str) else "direct_https"
+        reply_id = self.store.record_outbound_reply(
+            account_id=account_id,
+            reader_id=reader_id,
+            trigger_kind=trigger_kind,
+            trigger_ref_id=trigger_ref_id,
+            content=content,
+            delivery_mode=delivery_mode,
+            status="sent" if ok else "failed",
+            errcode=errcode,
+            errmsg=errmsg,
+            duration_ms=duration_ms,
+        )
+        _LOGGER.info(
+            "Support reply finished: reply_id=%d trigger=%s ok=%s errcode=%s duration_ms=%s",
+            reply_id,
+            trigger_kind,
+            str(ok).lower(),
+            errcode if errcode is not None else "-",
+            duration_ms if duration_ms is not None else "-",
+        )
+        return reply_id

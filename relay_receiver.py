@@ -20,9 +20,38 @@ from urllib.request import Request as URLRequest, urlopen
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
+from support_backend import (
+    DEFAULT_MAX_WAIT_SECONDS,
+    DEFAULT_QUIET_SECONDS,
+    SupportPipeline,
+    SupportStore,
+)
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
 
 _AUTH_TOKEN = os.environ.get("RELAY_AUTH_TOKEN", "")
 _LOG_PATH = Path(os.environ.get("RELAY_LOG_PATH", "data/relay-events.jsonl"))
+_SUPPORT_DB_PATH_RAW = os.environ.get("SUPPORT_DB_PATH", "").strip()
+_SUPPORT_QUIET_SECONDS = _env_float("SUPPORT_QUIET_SECONDS", DEFAULT_QUIET_SECONDS)
+_SUPPORT_MAX_WAIT_SECONDS = _env_float("SUPPORT_MAX_WAIT_SECONDS", DEFAULT_MAX_WAIT_SECONDS)
+_SUPPORT_AUTO_REPLY_ENABLED = _env_bool("SUPPORT_AUTO_REPLY_ENABLED", default=False)
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
 _DIRECT_ECHO_TEXT = os.environ.get("RELAY_DIRECT_ECHO_TEXT", "").strip()
@@ -314,6 +343,18 @@ def _get_store(application: FastAPI) -> RelayEventStore:
     return store
 
 
+def _get_support_pipeline(application: FastAPI) -> SupportPipeline | None:
+    pipeline = getattr(application.state, "support_pipeline", None)
+    return pipeline if isinstance(pipeline, SupportPipeline) else None
+
+
+def _require_support_pipeline(application: FastAPI) -> SupportPipeline:
+    pipeline = _get_support_pipeline(application)
+    if pipeline is None:
+        raise HTTPException(503, "support pipeline is not initialized")
+    return pipeline
+
+
 async def _run_direct_echo(seq: int, to_user: str, text: str) -> None:
     try:
         result = await asyncio.to_thread(_DIRECT_CLIENT.send_text, to_user, text)
@@ -353,14 +394,39 @@ async def _lifespan(application: FastAPI):
     if not _AUTH_TOKEN:
         raise RuntimeError("RELAY_AUTH_TOKEN must be set before starting the relay receiver")
     application.state.relay_store = RelayEventStore(_LOG_PATH)
+    db_path = (
+        Path(_SUPPORT_DB_PATH_RAW)
+        if _SUPPORT_DB_PATH_RAW
+        else (_LOG_PATH.parent / "library-support.db")
+    )
+    max_wait_seconds = max(_SUPPORT_MAX_WAIT_SECONDS, _SUPPORT_QUIET_SECONDS)
+    support_store = SupportStore(
+        db_path,
+        quiet_seconds=_SUPPORT_QUIET_SECONDS,
+        max_wait_seconds=max_wait_seconds,
+    )
+    pipeline = SupportPipeline(
+        support_store,
+        send_text_fn=_DIRECT_CLIENT.send_text,
+        auto_reply_enabled=_SUPPORT_AUTO_REPLY_ENABLED,
+    )
+    application.state.support_pipeline = pipeline
+    await pipeline.start()
     _LOGGER.info(
-        "Relay receiver ready: log_path=%s has_direct_creds=%s direct_echo=%s cloud_echo=%s",
+        "Relay receiver ready: log_path=%s db_path=%s has_direct_creds=%s auto_reply=%s direct_echo=%s cloud_echo=%s",
         _LOG_PATH,
+        db_path,
         str(bool(_APP_ID and _APP_SECRET)).lower(),
+        str(_SUPPORT_AUTO_REPLY_ENABLED).lower(),
         str(bool(_DIRECT_ECHO_TEXT)).lower(),
         str(bool(_CLOUD_ECHO_TEXT)).lower(),
     )
-    yield
+    try:
+        yield
+    finally:
+        await pipeline.stop()
+        support_store.close()
+        application.state.support_pipeline = None
 
 
 app = FastAPI(
@@ -391,6 +457,10 @@ async def receive_forwarded_wechat(
     client_ip = request.client.host if request.client else ""
     store = _get_store(request.app)
     duplicate, seq = store.record_event(payload, client_ip=client_ip)
+    pipeline = _get_support_pipeline(request.app)
+    if pipeline is not None:
+        ingest_result = pipeline.ingest_sync(payload, client_ip=client_ip)
+        background_tasks.add_task(pipeline.process_ingest_side_effects, ingest_result, payload)
 
     wx_headers = payload.get("wx_headers")
     wx_source = ""
@@ -482,3 +552,137 @@ async def send_test_reply(request: Request) -> JSONResponse:
         result["duration_ms"],
     )
     return JSONResponse({"seq": resolved_seq, **result}, headers=_HEADERS)
+
+
+@app.get("/relay/support/overview", response_class=JSONResponse)
+async def support_overview(request: Request) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    return JSONResponse(
+        {
+            "auto_reply_enabled": pipeline.auto_reply_enabled,
+            **pipeline.store.overview_metrics(),
+        },
+        headers=_HEADERS,
+    )
+
+
+@app.get("/relay/support/events", response_class=JSONResponse)
+async def list_support_events(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+    category: str | None = Query(default=None),
+) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    events = pipeline.store.list_events(limit=limit, category=category)
+    return JSONResponse({"count": len(events), "events": events}, headers=_HEADERS)
+
+
+@app.get("/relay/support/batches", response_class=JSONResponse)
+async def list_support_batches(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+    status: str | None = Query(default=None),
+) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    batches = pipeline.store.list_batches(limit=limit, status=status)
+    return JSONResponse({"count": len(batches), "batches": batches}, headers=_HEADERS)
+
+
+@app.get("/relay/support/feedbacks", response_class=JSONResponse)
+async def list_support_feedbacks(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    feedbacks = pipeline.store.list_feedbacks(limit=limit)
+    return JSONResponse({"count": len(feedbacks), "feedbacks": feedbacks}, headers=_HEADERS)
+
+
+@app.get("/relay/support/cases", response_class=JSONResponse)
+async def list_support_cases(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+    status: str | None = Query(default=None),
+) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    cases = pipeline.store.list_staff_cases(limit=limit, status=status)
+    return JSONResponse({"count": len(cases), "cases": cases}, headers=_HEADERS)
+
+
+@app.post("/relay/support/cases", response_class=JSONResponse)
+async def create_support_case(request: Request) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    payload = await _read_json_object(request)
+    reader_id = payload.get("reader_id")
+    summary = payload.get("summary")
+    account_id = payload.get("account_id") if isinstance(payload.get("account_id"), str) else "default"
+    if not isinstance(reader_id, str) or not reader_id.strip():
+        raise HTTPException(422, "reader_id must be a non-empty string")
+    if not isinstance(summary, str) or not summary.strip():
+        raise HTTPException(422, "summary must be a non-empty string")
+    latest_message = (
+        payload.get("latest_message").strip()
+        if isinstance(payload.get("latest_message"), str)
+        else ""
+    )
+    created = pipeline.store.create_staff_case(
+        account_id=account_id.strip() or "default",
+        reader_id=reader_id.strip(),
+        summary=summary.strip(),
+        latest_message=latest_message,
+    )
+    return JSONResponse({"case": created.to_dict()}, headers=_HEADERS)
+
+
+@app.post("/relay/support/cases/{case_id}/close", response_class=JSONResponse)
+async def close_support_case(request: Request, case_id: int) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    raw = await request.body()
+    payload: dict[str, Any] = {}
+    if raw.strip():
+        if len(raw) > MAX_BODY_BYTES:
+            raise HTTPException(413, "message exceeds 512 KiB")
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            raise HTTPException(400, "invalid JSON") from None
+        if not isinstance(decoded, dict):
+            raise HTTPException(422, "JSON object required")
+        payload = decoded
+    resolution_note = payload.get("resolution_note") if isinstance(payload.get("resolution_note"), str) else ""
+    closed = pipeline.store.close_staff_case(case_id, resolution_note=resolution_note)
+    if closed is None:
+        raise HTTPException(404, "staff case not found")
+    return JSONResponse({"case": closed.to_dict()}, headers=_HEADERS)
+
+
+@app.get("/relay/support/replies", response_class=JSONResponse)
+async def list_support_replies(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    replies = pipeline.store.list_outbound_replies(limit=limit)
+    return JSONResponse({"count": len(replies), "replies": replies}, headers=_HEADERS)
+
+
+@app.post("/relay/support/flush-due", response_class=JSONResponse)
+async def flush_due_support_batches(request: Request) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    outcomes = await pipeline.flush_due_now()
+    return JSONResponse(
+        {
+            "flushed_count": len(outcomes),
+            "outcomes": [item.to_dict() for item in outcomes],
+        },
+        headers=_HEADERS,
+    )
