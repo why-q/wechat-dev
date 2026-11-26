@@ -146,6 +146,7 @@ class SupportStoreAndMergeTests(unittest.TestCase):
             self.db_path,
             quiet_seconds=3.0,
             max_wait_seconds=10.0,
+            merge_enabled=True,
             clock=self.clock,
         )
 
@@ -285,7 +286,7 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
 
     def test_restart_recovery_flushes_overdue_and_reschedules_pending(self):
         clock = FakeClock()
-        store1 = SupportStore(self.db_path, quiet_seconds=3.0, max_wait_seconds=10.0, clock=clock)
+        store1 = SupportStore(self.db_path, quiet_seconds=3.0, max_wait_seconds=10.0, merge_enabled=True, clock=clock)
         store1.ingest_event(
             {"to_user": "gh_lib", "from_user": "o_past", "msg_type": "text", "msg_id": "p1", "content": "过期批次"},
             classify_message("text", "过期批次"),
@@ -304,7 +305,7 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
         async def on_flush(outcome):
             flushed_texts.append(outcome.batch.merged_text or "")
 
-        store2 = SupportStore(self.db_path, quiet_seconds=3.0, max_wait_seconds=10.0, clock=clock)
+        store2 = SupportStore(self.db_path, quiet_seconds=3.0, max_wait_seconds=10.0, merge_enabled=True, clock=clock)
         pipeline = SupportPipeline(store2, on_batch_flushed=on_flush)
 
         async def scenario():
@@ -332,7 +333,7 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
             sent_calls.append((to_user, content))
             return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 9, "mode": "direct_https"}
 
-        store = SupportStore(self.db_path, quiet_seconds=0.12, max_wait_seconds=0.35)
+        store = SupportStore(self.db_path, quiet_seconds=0.12, max_wait_seconds=0.35, merge_enabled=True)
         pipeline = SupportPipeline(
             store,
             send_text_fn=fake_send,
@@ -381,6 +382,7 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
                 patch.object(relay_receiver, "_AUTH_TOKEN", token),
                 patch.object(relay_receiver, "_LOG_PATH", self.log_path),
                 patch.object(relay_receiver, "_SUPPORT_DB_PATH_RAW", str(self.db_path)),
+                patch.object(relay_receiver, "_SUPPORT_MERGE_ENABLED", True),
                 patch.object(relay_receiver, "_SUPPORT_QUIET_SECONDS", 3.0),
                 patch.object(relay_receiver, "_SUPPORT_MAX_WAIT_SECONDS", 10.0),
                 patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ENABLED", False),

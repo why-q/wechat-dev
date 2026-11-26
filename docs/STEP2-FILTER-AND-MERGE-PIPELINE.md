@@ -53,12 +53,12 @@
 
 通过环境变量 `SUPPORT_MERGE_ENABLED` 切换两种普通问答调度策略：
 
-1. **`SUPPORT_MERGE_ENABLED=true`（合并调度 / Debounce 模式，默认）**：
+1. **`SUPPORT_MERGE_ENABLED=true`（合并调度 / Debounce 模式）**：
    - 收到去重后的新 `question` 时，若已有 `open` 批次且 `now >= batch.flush_at_epoch`（已到截止但定时器尚未运行），先原子冲刷旧批次，再为新消息创建新批次；若 `now < batch.flush_at_epoch`，追加进该 `open` 批次并更新 `quiet_deadline = now + 3s`、`flush_at = min(quiet_deadline, max_deadline)`，`max_deadline = first + 10s` 保持不变。
    - `SupportPipeline` 在后台维护单周期 `asyncio` 调度任务；重启加载时立即冲刷 `flush_at <= now` 的遗留批次，并对未到期批次按剩余秒数重新调度。
 
-2. **`SUPPORT_MERGE_ENABLED=false`（立即启动 + 抢占重跑模式 / Immediate 模式）**：
-   - 依据真实读者留言分布（约 80 余名读者中仅 2 名发出多条连续消息，且每名不超过 3 条），为减少 >97% 单条提问者的 3 秒人工等待，允许关闭合并窗口。
+2. **`SUPPORT_MERGE_ENABLED=false`（立即启动 + 抢占重跑模式 / Immediate 模式，当前默认）**：
+   - 依据真实读者留言分布（约 80 余名读者中仅 2 名发出多条连续消息，且每名不超过 3 条），为避免 3 秒静默等待拖慢绝大多数单条提问用户，默认关闭延迟合并窗口。
    - 首条 `question` 到达即创建 `status='processing'`、`generation=1` 批次并立刻启动异步应答任务。
    - 若回答提交前同读者又发来新 `question` 且未超 `SUPPORT_IMMEDIATE_MAX_PREEMPTS`（默认 `2`，即单轮最多合并 3 条）和 `max_wait_seconds`，则把新文本并入该批次、`generation += 1`、`preempt_count += 1`，立即取消旧异步任务并启动新一代重跑。
    - **提交屏障防双发与防饿死**：唯有在 `commit_batch_generation` 原子核对 `status='processing' AND generation=expected` 通过后才闭合批次并发送/记待办；过期代次静默丢弃。达到重跑上限或超时上限时将当前批次锁定（`preempt_locked=1`）让其正常答复，后续新消息自动写入 `queued` 批次排队接力。
