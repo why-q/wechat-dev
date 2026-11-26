@@ -88,6 +88,8 @@ flowchart LR
 
 微信回调按 5 秒时限尽快确认。消息合并、Jev 和 Tier 2 在确认后异步处理，再通过客服消息 API 发送答复，计入该场景的发送额度。旧版 RAG PoC 的两次相关查询耗时 10.631 秒和 16.682 秒。Jev 的超时计入异步回复的端到端耗时。[微信回调时限](https://developers.weixin.qq.com/doc/service/guide/product/message/Receiving_standard_messages.md) · [云托管主动回复](https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/development/weixin/callback) · [PoC 实测记录](../rag-poc/README.md#测试)
 
+普通文本按同一公众号下的同一读者合并。试运行按服务端接收时间计时，最后一条新文本后静默满 3 秒，或首条新文本后满 10 秒，以先到者为准。截止前收到的新普通文本会重置静默计时。到时按接收顺序合并已收到且去重的文本，随后检查是否属于同一未结事项，再进入对应分支。
+
 自动回复启用前，用授权微信账号发起一次真实私信，验证消息到达自有服务器，再经计划采用的发信链路回到手机。记录客服 API 返回值，并以手机实际收件作为送达验收。此前同账号直连 `custom/send` 返回过 `48001`，云托管客服消息发信仍待真实验证。若再次返回 `48001`，由公众号管理员核对并开通客服消息权限。使用云调用时同时核对开放接口服务和 `custom/send` 白名单。回发待验证或不可用期间，由馆员继续在公众号后台回复。[历史发信记录](../README.md#云托管协议差异)
 
 ### 馆员处理
