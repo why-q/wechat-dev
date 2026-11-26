@@ -2,7 +2,9 @@
 
 from .db import (
     BatchSnapshot,
+    DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
+    DEFAULT_MERGE_ENABLED,
     DEFAULT_QUIET_SECONDS,
     FlushOutcome,
     IngestResult,
@@ -20,7 +22,9 @@ from .pipeline import SupportPipeline
 
 __all__ = [
     "BatchSnapshot",
+    "DEFAULT_MAX_PREEMPTS",
     "DEFAULT_MAX_WAIT_SECONDS",
+    "DEFAULT_MERGE_ENABLED",
     "DEFAULT_QUIET_SECONDS",
     "EMERGENCY_CONTACT_REPLY",
     "FEEDBACK_RECEIVED_REPLY",

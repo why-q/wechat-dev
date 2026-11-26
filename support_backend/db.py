@@ -14,9 +14,11 @@ from typing import Any, Callable
 
 from .filters import FilterDecision, default_same_case_matcher
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 DEFAULT_QUIET_SECONDS = 3.0
 DEFAULT_MAX_WAIT_SECONDS = 10.0
+DEFAULT_MERGE_ENABLED = True
+DEFAULT_MAX_PREEMPTS = 2
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 3600
 
 SameCaseMatcher = Callable[[str, dict[str, Any], float], tuple[bool, str]]
@@ -107,6 +109,9 @@ class BatchSnapshot:
     flushed_at_epoch: float | None
     route_stage: str
     staff_case_id: int | None
+    generation: int = 1
+    preempt_count: int = 0
+    preempt_locked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -124,6 +129,9 @@ class BatchSnapshot:
             "flushed_at_epoch": self.flushed_at_epoch,
             "route_stage": self.route_stage,
             "staff_case_id": self.staff_case_id,
+            "generation": self.generation,
+            "preempt_count": self.preempt_count,
+            "preempt_locked": self.preempt_locked,
         }
 
 
@@ -159,6 +167,8 @@ class IngestResult:
     feedback_id: int | None = None
     staff_case_id: int | None = None
     pre_flushed: tuple[FlushOutcome, ...] = ()
+    preempted_batch_id: int | None = None
+    queued_behind_batch_id: int | None = None
 
 
 _SCHEMA_SQL = """
@@ -214,12 +224,11 @@ CREATE TABLE IF NOT EXISTS merge_batches (
     merged_text TEXT,
     flushed_at_epoch REAL,
     route_stage TEXT NOT NULL DEFAULT 'pending',
-    staff_case_id INTEGER REFERENCES staff_cases(case_id)
+    staff_case_id INTEGER REFERENCES staff_cases(case_id),
+    generation INTEGER NOT NULL DEFAULT 1,
+    preempt_count INTEGER NOT NULL DEFAULT 0,
+    preempt_locked INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_merge_open_reader
-    ON merge_batches(account_id, reader_id)
-    WHERE status = 'open';
 
 CREATE INDEX IF NOT EXISTS idx_merge_status_flush
     ON merge_batches(status, flush_at_epoch);
@@ -303,6 +312,8 @@ class SupportStore:
         *,
         quiet_seconds: float = DEFAULT_QUIET_SECONDS,
         max_wait_seconds: float = DEFAULT_MAX_WAIT_SECONDS,
+        merge_enabled: bool = DEFAULT_MERGE_ENABLED,
+        max_preempts: int = DEFAULT_MAX_PREEMPTS,
         retention_seconds: float = DEFAULT_RETENTION_SECONDS,
         clock: Callable[[], float] = time.time,
         same_case_matcher: SameCaseMatcher = _default_same_case_adapter,
@@ -311,9 +322,13 @@ class SupportStore:
             raise ValueError("quiet_seconds must be positive")
         if max_wait_seconds < quiet_seconds:
             raise ValueError("max_wait_seconds must be >= quiet_seconds")
+        if max_preempts < 0:
+            raise ValueError("max_preempts must be >= 0")
         self.db_path = Path(db_path)
         self.quiet_seconds = float(quiet_seconds)
         self.max_wait_seconds = float(max_wait_seconds)
+        self.merge_enabled = bool(merge_enabled)
+        self.max_preempts = int(max_preempts)
         self.retention_seconds = float(retention_seconds)
         self._clock = clock
         self._same_case_matcher = same_case_matcher
@@ -338,7 +353,38 @@ class SupportStore:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.executescript(_SCHEMA_SQL)
+            existing_cols = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(merge_batches)").fetchall()
+            }
             with self._conn:
+                if "generation" not in existing_cols:
+                    self._conn.execute(
+                        "ALTER TABLE merge_batches ADD COLUMN generation INTEGER NOT NULL DEFAULT 1"
+                    )
+                if "preempt_count" not in existing_cols:
+                    self._conn.execute(
+                        "ALTER TABLE merge_batches ADD COLUMN preempt_count INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "preempt_locked" not in existing_cols:
+                    self._conn.execute(
+                        "ALTER TABLE merge_batches ADD COLUMN preempt_locked INTEGER NOT NULL DEFAULT 0"
+                    )
+                self._conn.execute("DROP INDEX IF EXISTS idx_merge_open_reader;")
+                self._conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_merge_active_reader
+                    ON merge_batches(account_id, reader_id)
+                    WHERE status IN ('open', 'processing') AND preempt_locked = 0;
+                    """
+                )
+                self._conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_merge_queued_reader
+                    ON merge_batches(account_id, reader_id)
+                    WHERE status = 'queued';
+                    """
+                )
                 self._conn.execute(
                     "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
@@ -373,6 +419,9 @@ class SupportStore:
             flushed_at_epoch=float(row["flushed_at_epoch"]) if row["flushed_at_epoch"] is not None else None,
             route_stage=str(row["route_stage"]),
             staff_case_id=int(row["staff_case_id"]) if row["staff_case_id"] is not None else None,
+            generation=int(row["generation"]),
+            preempt_count=int(row["preempt_count"]),
+            preempt_locked=bool(row["preempt_locked"]),
         )
 
     def _row_to_case(self, row: sqlite3.Row) -> StaffCaseSnapshot:
@@ -441,7 +490,7 @@ class SupportStore:
                     )
 
             pre_flushed: list[FlushOutcome] = []
-            if decision.category == "question" and reader_id:
+            if decision.category == "question" and reader_id and self.merge_enabled:
                 open_row = self._conn.execute(
                     """
                     SELECT * FROM merge_batches
@@ -493,67 +542,28 @@ class SupportStore:
                 batch_snapshot: BatchSnapshot | None = None
                 feedback_id: int | None = None
                 staff_case_id: int | None = None
+                preempted_batch_id: int | None = None
+                queued_behind_batch_id: int | None = None
 
                 if decision.category == "question" and reader_id:
-                    open_row = self._conn.execute(
-                        """
-                        SELECT * FROM merge_batches
-                        WHERE account_id = ? AND reader_id = ? AND status = 'open'
-                        """,
-                        (account_id, reader_id),
-                    ).fetchone()
-                    if open_row is None:
-                        quiet_deadline = now_epoch + self.quiet_seconds
-                        max_deadline = now_epoch + self.max_wait_seconds
-                        flush_at = min(quiet_deadline, max_deadline)
-                        batch_cursor = self._conn.execute(
-                            """
-                            INSERT INTO merge_batches(
-                                account_id, reader_id, status,
-                                first_received_at_epoch, last_received_at_epoch,
-                                quiet_deadline_epoch, max_deadline_epoch, flush_at_epoch,
-                                message_count, route_stage
-                            ) VALUES (?, ?, 'open', ?, ?, ?, ?, ?, 1, 'pending')
-                            """,
-                            (
-                                account_id,
-                                reader_id,
-                                now_epoch,
-                                now_epoch,
-                                quiet_deadline,
-                                max_deadline,
-                                flush_at,
-                            ),
+                    if self.merge_enabled:
+                        batch_id = self._enqueue_debounce_locked(
+                            account_id=account_id,
+                            reader_id=reader_id,
+                            seq=seq,
+                            text_content=decision.normalized_text,
+                            now_epoch=now_epoch,
                         )
-                        batch_id = int(batch_cursor.lastrowid)
                     else:
-                        batch_id = int(open_row["batch_id"])
-                        quiet_deadline = now_epoch + self.quiet_seconds
-                        max_deadline = float(open_row["max_deadline_epoch"])
-                        flush_at = min(quiet_deadline, max_deadline)
-                        self._conn.execute(
-                            """
-                            UPDATE merge_batches
-                            SET last_received_at_epoch = ?,
-                                quiet_deadline_epoch = ?,
-                                flush_at_epoch = ?,
-                                message_count = message_count + 1
-                            WHERE batch_id = ?
-                            """,
-                            (now_epoch, quiet_deadline, flush_at, batch_id),
+                        batch_id, preempted_batch_id, queued_behind_batch_id = (
+                            self._enqueue_immediate_locked(
+                                account_id=account_id,
+                                reader_id=reader_id,
+                                seq=seq,
+                                text_content=decision.normalized_text,
+                                now_epoch=now_epoch,
+                            )
                         )
-
-                    self._conn.execute(
-                        """
-                        INSERT INTO batch_messages(batch_id, event_seq, received_at_epoch, text_content)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (batch_id, seq, now_epoch, decision.normalized_text),
-                    )
-                    self._conn.execute(
-                        "UPDATE inbound_events SET batch_id = ? WHERE seq = ?",
-                        (batch_id, seq),
-                    )
                     batch_snapshot = self.get_batch(batch_id)
 
                 elif decision.category == "feedback":
@@ -617,15 +627,31 @@ class SupportStore:
                 feedback_id=feedback_id,
                 staff_case_id=staff_case_id,
                 pre_flushed=tuple(pre_flushed),
+                preempted_batch_id=preempted_batch_id,
+                queued_behind_batch_id=queued_behind_batch_id,
             )
 
-    def _flush_batch_locked(self, batch_id: int, *, now_epoch: float) -> FlushOutcome | None:
-        batch_row = self._conn.execute(
-            "SELECT * FROM merge_batches WHERE batch_id = ?", (batch_id,)
-        ).fetchone()
-        if batch_row is None or batch_row["status"] != "open":
-            return None
+    def _append_batch_message_locked(
+        self,
+        *,
+        batch_id: int,
+        seq: int,
+        now_epoch: float,
+        text_content: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO batch_messages(batch_id, event_seq, received_at_epoch, text_content)
+            VALUES (?, ?, ?, ?)
+            """,
+            (batch_id, seq, now_epoch, text_content),
+        )
+        self._conn.execute(
+            "UPDATE inbound_events SET batch_id = ? WHERE seq = ?",
+            (batch_id, seq),
+        )
 
+    def _ordered_batch_texts_locked(self, batch_id: int) -> tuple[tuple[int, ...], str]:
         msg_rows = self._conn.execute(
             """
             SELECT event_seq, text_content
@@ -637,11 +663,251 @@ class SupportStore:
         ).fetchall()
         event_seqs = tuple(int(r["event_seq"]) for r in msg_rows)
         merged_text = "\n".join(str(r["text_content"]) for r in msg_rows if str(r["text_content"]).strip())
+        return event_seqs, merged_text
 
-        account_id = str(batch_row["account_id"])
-        reader_id = str(batch_row["reader_id"])
-        now_utc = _utc_iso(now_epoch)
+    def _enqueue_debounce_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        seq: int,
+        text_content: str,
+        now_epoch: float,
+    ) -> int:
+        active_row = self._conn.execute(
+            """
+            SELECT * FROM merge_batches
+            WHERE account_id = ? AND reader_id = ? AND status IN ('open', 'processing') AND preempt_locked = 0
+            """,
+            (account_id, reader_id),
+        ).fetchone()
+        if active_row is not None and active_row["status"] == "processing":
+            self._conn.execute(
+                "UPDATE merge_batches SET preempt_locked = 1 WHERE batch_id = ?",
+                (int(active_row["batch_id"]),),
+            )
+            active_row = None
 
+        if active_row is None:
+            quiet_deadline = now_epoch + self.quiet_seconds
+            max_deadline = now_epoch + self.max_wait_seconds
+            flush_at = min(quiet_deadline, max_deadline)
+            batch_cursor = self._conn.execute(
+                """
+                INSERT INTO merge_batches(
+                    account_id, reader_id, status,
+                    first_received_at_epoch, last_received_at_epoch,
+                    quiet_deadline_epoch, max_deadline_epoch, flush_at_epoch,
+                    message_count, route_stage, generation, preempt_count, preempt_locked
+                ) VALUES (?, ?, 'open', ?, ?, ?, ?, ?, 1, 'pending', 1, 0, 0)
+                """,
+                (
+                    account_id,
+                    reader_id,
+                    now_epoch,
+                    now_epoch,
+                    quiet_deadline,
+                    max_deadline,
+                    flush_at,
+                ),
+            )
+            batch_id = int(batch_cursor.lastrowid)
+        else:
+            batch_id = int(active_row["batch_id"])
+            quiet_deadline = now_epoch + self.quiet_seconds
+            max_deadline = float(active_row["max_deadline_epoch"])
+            flush_at = min(quiet_deadline, max_deadline)
+            self._conn.execute(
+                """
+                UPDATE merge_batches
+                SET last_received_at_epoch = ?,
+                    quiet_deadline_epoch = ?,
+                    flush_at_epoch = ?,
+                    message_count = message_count + 1
+                WHERE batch_id = ?
+                """,
+                (now_epoch, quiet_deadline, flush_at, batch_id),
+            )
+        self._append_batch_message_locked(
+            batch_id=batch_id, seq=seq, now_epoch=now_epoch, text_content=text_content
+        )
+        return batch_id
+
+    def _enqueue_immediate_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        seq: int,
+        text_content: str,
+        now_epoch: float,
+    ) -> tuple[int, int | None, int | None]:
+        """Enqueue into an immediate-mode generation or queue behind a locked batch."""
+        locked_row = self._conn.execute(
+            """
+            SELECT batch_id FROM merge_batches
+            WHERE account_id = ? AND reader_id = ? AND status = 'processing' AND preempt_locked = 1
+            ORDER BY batch_id DESC
+            LIMIT 1
+            """,
+            (account_id, reader_id),
+        ).fetchone()
+        if locked_row is not None:
+            batch_id = self._append_or_create_queued_locked(
+                account_id=account_id,
+                reader_id=reader_id,
+                seq=seq,
+                text_content=text_content,
+                now_epoch=now_epoch,
+            )
+            return batch_id, None, int(locked_row["batch_id"])
+
+        active_row = self._conn.execute(
+            """
+            SELECT * FROM merge_batches
+            WHERE account_id = ? AND reader_id = ? AND status IN ('open', 'processing') AND preempt_locked = 0
+            """,
+            (account_id, reader_id),
+        ).fetchone()
+        if active_row is None:
+            max_deadline = now_epoch + self.max_wait_seconds
+            batch_cursor = self._conn.execute(
+                """
+                INSERT INTO merge_batches(
+                    account_id, reader_id, status,
+                    first_received_at_epoch, last_received_at_epoch,
+                    quiet_deadline_epoch, max_deadline_epoch, flush_at_epoch,
+                    message_count, merged_text, route_stage, generation, preempt_count, preempt_locked
+                ) VALUES (?, ?, 'processing', ?, ?, ?, ?, ?, 1, ?, 'pending', 1, 0, 0)
+                """,
+                (
+                    account_id,
+                    reader_id,
+                    now_epoch,
+                    now_epoch,
+                    now_epoch,
+                    max_deadline,
+                    now_epoch,
+                    text_content,
+                ),
+            )
+            batch_id = int(batch_cursor.lastrowid)
+            self._append_batch_message_locked(
+                batch_id=batch_id, seq=seq, now_epoch=now_epoch, text_content=text_content
+            )
+            return batch_id, None, None
+
+        active_id = int(active_row["batch_id"])
+        can_preempt = (
+            int(active_row["preempt_count"]) < self.max_preempts
+            and now_epoch < float(active_row["max_deadline_epoch"])
+        )
+        if can_preempt:
+            self._append_batch_message_locked(
+                batch_id=active_id, seq=seq, now_epoch=now_epoch, text_content=text_content
+            )
+            _, merged_text = self._ordered_batch_texts_locked(active_id)
+            self._conn.execute(
+                """
+                UPDATE merge_batches
+                SET status = 'processing',
+                    last_received_at_epoch = ?,
+                    quiet_deadline_epoch = ?,
+                    flush_at_epoch = ?,
+                    message_count = message_count + 1,
+                    merged_text = ?,
+                    generation = generation + 1,
+                    preempt_count = preempt_count + 1
+                WHERE batch_id = ?
+                """,
+                (now_epoch, now_epoch, now_epoch, merged_text, active_id),
+            )
+            return active_id, active_id, None
+
+        # Preempt limit or time cap reached: let the in-flight batch finish undisturbed.
+        self._conn.execute(
+            "UPDATE merge_batches SET preempt_locked = 1 WHERE batch_id = ?",
+            (active_id,),
+        )
+        queued_id = self._append_or_create_queued_locked(
+            account_id=account_id,
+            reader_id=reader_id,
+            seq=seq,
+            text_content=text_content,
+            now_epoch=now_epoch,
+        )
+        return queued_id, None, active_id
+
+    def _append_or_create_queued_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        seq: int,
+        text_content: str,
+        now_epoch: float,
+    ) -> int:
+        queued_row = self._conn.execute(
+            """
+            SELECT batch_id FROM merge_batches
+            WHERE account_id = ? AND reader_id = ? AND status = 'queued'
+            """,
+            (account_id, reader_id),
+        ).fetchone()
+        if queued_row is None:
+            max_deadline = now_epoch + self.max_wait_seconds
+            cursor = self._conn.execute(
+                """
+                INSERT INTO merge_batches(
+                    account_id, reader_id, status,
+                    first_received_at_epoch, last_received_at_epoch,
+                    quiet_deadline_epoch, max_deadline_epoch, flush_at_epoch,
+                    message_count, merged_text, route_stage, generation, preempt_count, preempt_locked
+                ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, 1, ?, 'pending', 1, 0, 0)
+                """,
+                (
+                    account_id,
+                    reader_id,
+                    now_epoch,
+                    now_epoch,
+                    now_epoch,
+                    max_deadline,
+                    now_epoch,
+                    text_content,
+                ),
+            )
+            batch_id = int(cursor.lastrowid)
+            self._append_batch_message_locked(
+                batch_id=batch_id, seq=seq, now_epoch=now_epoch, text_content=text_content
+            )
+            return batch_id
+
+        batch_id = int(queued_row["batch_id"])
+        self._append_batch_message_locked(
+            batch_id=batch_id, seq=seq, now_epoch=now_epoch, text_content=text_content
+        )
+        _, merged_text = self._ordered_batch_texts_locked(batch_id)
+        self._conn.execute(
+            """
+            UPDATE merge_batches
+            SET last_received_at_epoch = ?,
+                message_count = message_count + 1,
+                merged_text = ?
+            WHERE batch_id = ?
+            """,
+            (now_epoch, merged_text, batch_id),
+        )
+        return batch_id
+
+    def _compute_batch_route_locked(
+        self,
+        *,
+        batch_id: int,
+        account_id: str,
+        reader_id: str,
+        now_epoch: float,
+    ) -> tuple[tuple[int, ...], str, str, int | None, str]:
+        event_seqs, merged_text = self._ordered_batch_texts_locked(batch_id)
         open_case_row = self._conn.execute(
             """
             SELECT * FROM staff_cases
@@ -651,61 +917,108 @@ class SupportStore:
             """,
             (account_id, reader_id),
         ).fetchone()
-
         route_stage = "ready_for_triage"
         matched_case_id: int | None = None
         same_case_reason = "no_open_case"
-
         if open_case_row is not None:
             case_dict = self._row_to_case(open_case_row).to_dict()
             is_same, same_case_reason = self._same_case_matcher(merged_text, case_dict, now_epoch)
             if is_same:
                 matched_case_id = int(open_case_row["case_id"])
                 route_stage = "staff_case_appended"
+        return event_seqs, merged_text, route_stage, matched_case_id, same_case_reason
 
-        with self._conn:
-            if matched_case_id is not None:
-                self._conn.execute(
-                    """
-                    UPDATE staff_cases
-                    SET latest_message = ?, updated_at_epoch = ?, updated_at_utc = ?
-                    WHERE case_id = ?
-                    """,
-                    (merged_text, now_epoch, now_utc, matched_case_id),
-                )
-                self._conn.execute(
-                    """
-                    INSERT INTO staff_case_messages(
-                        case_id, batch_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
-                    ) VALUES (?, ?, ?, 'reader', ?, ?, ?)
-                    """,
-                    (
-                        matched_case_id,
-                        batch_id,
-                        event_seqs[-1] if event_seqs else None,
-                        merged_text,
-                        now_epoch,
-                        now_utc,
-                    ),
-                )
-                self._conn.execute(
-                    "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
-                    (matched_case_id, batch_id),
-                )
+    def _apply_flush_commit_locked(
+        self,
+        *,
+        batch_id: int,
+        event_seqs: tuple[int, ...],
+        merged_text: str,
+        route_stage: str,
+        matched_case_id: int | None,
+        now_epoch: float,
+        expected_status: str,
+        expected_generation: int | None = None,
+    ) -> bool:
+        now_utc = _utc_iso(now_epoch)
+        where_clause = "WHERE batch_id = ? AND status = ?"
+        params: list[Any] = [merged_text, now_epoch, route_stage, matched_case_id, batch_id, expected_status]
+        if expected_generation is not None:
+            where_clause += " AND generation = ?"
+            params.append(expected_generation)
 
+        cursor = self._conn.execute(
+            f"""
+            UPDATE merge_batches
+            SET status = 'flushed',
+                merged_text = ?,
+                flushed_at_epoch = ?,
+                route_stage = ?,
+                staff_case_id = ?
+            {where_clause}
+            """,
+            params,
+        )
+        if cursor.rowcount == 0:
+            return False
+
+        if matched_case_id is not None:
             self._conn.execute(
                 """
-                UPDATE merge_batches
-                SET status = 'flushed',
-                    merged_text = ?,
-                    flushed_at_epoch = ?,
-                    route_stage = ?,
-                    staff_case_id = ?
-                WHERE batch_id = ? AND status = 'open'
+                UPDATE staff_cases
+                SET latest_message = ?, updated_at_epoch = ?, updated_at_utc = ?
+                WHERE case_id = ?
                 """,
-                (merged_text, now_epoch, route_stage, matched_case_id, batch_id),
+                (merged_text, now_epoch, now_utc, matched_case_id),
             )
+            self._conn.execute(
+                """
+                INSERT INTO staff_case_messages(
+                    case_id, batch_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
+                ) VALUES (?, ?, ?, 'reader', ?, ?, ?)
+                """,
+                (
+                    matched_case_id,
+                    batch_id,
+                    event_seqs[-1] if event_seqs else None,
+                    merged_text,
+                    now_epoch,
+                    now_utc,
+                ),
+            )
+            self._conn.execute(
+                "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
+                (matched_case_id, batch_id),
+            )
+        return True
 
+    def _flush_batch_locked(self, batch_id: int, *, now_epoch: float) -> FlushOutcome | None:
+        batch_row = self._conn.execute(
+            "SELECT * FROM merge_batches WHERE batch_id = ?", (batch_id,)
+        ).fetchone()
+        if batch_row is None or batch_row["status"] != "open":
+            return None
+
+        event_seqs, merged_text, route_stage, matched_case_id, same_case_reason = (
+            self._compute_batch_route_locked(
+                batch_id=batch_id,
+                account_id=str(batch_row["account_id"]),
+                reader_id=str(batch_row["reader_id"]),
+                now_epoch=now_epoch,
+            )
+        )
+        with self._conn:
+            committed = self._apply_flush_commit_locked(
+                batch_id=batch_id,
+                event_seqs=event_seqs,
+                merged_text=merged_text,
+                route_stage=route_stage,
+                matched_case_id=matched_case_id,
+                now_epoch=now_epoch,
+                expected_status="open",
+            )
+        if not committed:
+            return None
         updated_batch = self.get_batch(batch_id)
         assert updated_batch is not None
         return FlushOutcome(
@@ -715,6 +1028,154 @@ class SupportStore:
             staff_case_id=matched_case_id,
             same_case_reason=same_case_reason,
         )
+
+    def prepare_immediate_generation(
+        self, batch_id: int, expected_generation: int, *, now_epoch: float | None = None
+    ) -> FlushOutcome | None:
+        """Compute current merged text and staff-case route without closing the processing batch."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            batch_row = self._conn.execute(
+                "SELECT * FROM merge_batches WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+            if (
+                batch_row is None
+                or batch_row["status"] != "processing"
+                or int(batch_row["generation"]) != expected_generation
+            ):
+                return None
+            event_seqs, merged_text, route_stage, matched_case_id, same_case_reason = (
+                self._compute_batch_route_locked(
+                    batch_id=batch_id,
+                    account_id=str(batch_row["account_id"]),
+                    reader_id=str(batch_row["reader_id"]),
+                    now_epoch=now_val,
+                )
+            )
+            snapshot = self._row_to_batch(batch_row)
+            return FlushOutcome(
+                batch=snapshot,
+                event_seqs=event_seqs,
+                route_stage=route_stage,
+                staff_case_id=matched_case_id,
+                same_case_reason=same_case_reason,
+            )
+
+    def commit_batch_generation(
+        self,
+        batch_id: int,
+        expected_generation: int,
+        *,
+        route_stage: str,
+        staff_case_id: int | None = None,
+        same_case_reason: str = "",
+        now_epoch: float | None = None,
+    ) -> tuple[FlushOutcome | None, BatchSnapshot | None]:
+        """Atomically commit a processing batch iff its generation was not preempted."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            batch_row = self._conn.execute(
+                "SELECT * FROM merge_batches WHERE batch_id = ?", (batch_id,)
+            ).fetchone()
+            if (
+                batch_row is None
+                or batch_row["status"] != "processing"
+                or int(batch_row["generation"]) != expected_generation
+            ):
+                return None, None
+
+            event_seqs, merged_text = self._ordered_batch_texts_locked(batch_id)
+            account_id = str(batch_row["account_id"])
+            reader_id = str(batch_row["reader_id"])
+            promoted_snapshot: BatchSnapshot | None = None
+
+            with self._conn:
+                committed = self._apply_flush_commit_locked(
+                    batch_id=batch_id,
+                    event_seqs=event_seqs,
+                    merged_text=merged_text,
+                    route_stage=route_stage,
+                    matched_case_id=staff_case_id,
+                    now_epoch=now_val,
+                    expected_status="processing",
+                    expected_generation=expected_generation,
+                )
+                if not committed:
+                    return None, None
+
+                queued_row = self._conn.execute(
+                    """
+                    SELECT batch_id FROM merge_batches
+                    WHERE account_id = ? AND reader_id = ? AND status = 'queued'
+                    ORDER BY batch_id ASC
+                    LIMIT 1
+                    """,
+                    (account_id, reader_id),
+                ).fetchone()
+                if queued_row is not None:
+                    queued_id = int(queued_row["batch_id"])
+                    self._conn.execute(
+                        """
+                        UPDATE merge_batches
+                        SET status = 'processing',
+                            generation = 1,
+                            preempt_count = 0,
+                            preempt_locked = 0,
+                            max_deadline_epoch = ?,
+                            flush_at_epoch = ?
+                        WHERE batch_id = ? AND status = 'queued'
+                        """,
+                        (now_val + self.max_wait_seconds, now_val, queued_id),
+                    )
+                    promoted_snapshot = self.get_batch(queued_id)
+
+            updated_batch = self.get_batch(batch_id)
+            assert updated_batch is not None
+            return (
+                FlushOutcome(
+                    batch=updated_batch,
+                    event_seqs=event_seqs,
+                    route_stage=route_stage,
+                    staff_case_id=staff_case_id,
+                    same_case_reason=same_case_reason,
+                ),
+                promoted_snapshot,
+            )
+
+    def recover_immediate_batches(self, *, now_epoch: float | None = None) -> list[BatchSnapshot]:
+        """Return unfinished processing batches and promote any orphaned queued batches."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            with self._conn:
+                orphan_rows = self._conn.execute(
+                    """
+                    SELECT q.batch_id
+                    FROM merge_batches AS q
+                    WHERE q.status = 'queued'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM merge_batches AS active
+                          WHERE active.account_id = q.account_id
+                            AND active.reader_id = q.reader_id
+                            AND active.status = 'processing'
+                      )
+                    """
+                ).fetchall()
+                for row in orphan_rows:
+                    self._conn.execute(
+                        """
+                        UPDATE merge_batches
+                        SET status = 'processing',
+                            generation = 1,
+                            preempt_locked = 0,
+                            max_deadline_epoch = ?
+                        WHERE batch_id = ? AND status = 'queued'
+                        """,
+                        (now_val + self.max_wait_seconds, int(row["batch_id"])),
+                    )
+            rows = self._conn.execute(
+                "SELECT * FROM merge_batches WHERE status = 'processing' ORDER BY batch_id ASC"
+            ).fetchall()
+            return [self._row_to_batch(r) for r in rows]
 
     def flush_batch(self, batch_id: int, *, now_epoch: float | None = None) -> FlushOutcome | None:
         """Flush a single open batch immediately regardless of deadline."""
@@ -1021,8 +1482,20 @@ class SupportStore:
             open_batches = int(
                 self._conn.execute("SELECT COUNT(*) FROM merge_batches WHERE status = 'open'").fetchone()[0]
             )
+            processing_batches = int(
+                self._conn.execute("SELECT COUNT(*) FROM merge_batches WHERE status = 'processing'").fetchone()[0]
+            )
+            queued_batches = int(
+                self._conn.execute("SELECT COUNT(*) FROM merge_batches WHERE status = 'queued'").fetchone()[0]
+            )
             flushed_batches = int(
                 self._conn.execute("SELECT COUNT(*) FROM merge_batches WHERE status = 'flushed'").fetchone()[0]
+            )
+            preempted_total = int(
+                self._conn.execute("SELECT COALESCE(SUM(preempt_count), 0) FROM merge_batches").fetchone()[0]
+            )
+            multi_message_batches = int(
+                self._conn.execute("SELECT COUNT(*) FROM merge_batches WHERE message_count > 1").fetchone()[0]
             )
             open_cases = int(
                 self._conn.execute("SELECT COUNT(*) FROM staff_cases WHERE status = 'open'").fetchone()[0]
@@ -1036,11 +1509,17 @@ class SupportStore:
             reply_statuses = {str(r["status"]): int(r["cnt"]) for r in reply_rows}
             return {
                 "schema_version": SCHEMA_VERSION,
+                "merge_enabled": self.merge_enabled,
+                "max_preempts": self.max_preempts,
                 "quiet_seconds": self.quiet_seconds,
                 "max_wait_seconds": self.max_wait_seconds,
                 "inbound_categories": categories,
                 "open_batches": open_batches,
+                "processing_batches": processing_batches,
+                "queued_batches": queued_batches,
                 "flushed_batches": flushed_batches,
+                "preempted_total": preempted_total,
+                "multi_message_batches": multi_message_batches,
                 "open_staff_cases": open_cases,
                 "feedback_count": feedback_total,
                 "outbound_replies": reply_statuses,

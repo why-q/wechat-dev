@@ -1,4 +1,4 @@
-"""Asynchronous merge scheduler, Filter actions, and recovery pipeline."""
+"""Asynchronous merge / immediate-preemption scheduler, Filter actions, and recovery pipeline."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ def _safe_errmsg(value: object) -> str:
 
 
 class SupportPipeline:
-    """Coordinates Filter, 3s-quiet / 10s-max message merging, recovery, and async replies."""
+    """Coordinates Filter, debounce/immediate message dispatch, recovery, and async replies."""
 
     def __init__(
         self,
@@ -38,11 +38,13 @@ class SupportPipeline:
         *,
         send_text_fn: SendTextFn | None = None,
         auto_reply_enabled: bool = False,
+        triage_fn: BatchFlushedHook | None = None,
         on_batch_flushed: BatchFlushedHook | None = None,
     ) -> None:
         self.store = store
         self.send_text_fn = send_text_fn
         self.auto_reply_enabled = auto_reply_enabled
+        self.triage_fn = triage_fn
         self.on_batch_flushed = on_batch_flushed
 
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -50,9 +52,10 @@ class SupportPipeline:
         self._stop_requested = False
         self._scheduler_task: asyncio.Task[None] | None = None
         self._flush_lock: asyncio.Lock | None = None
+        self._active_tasks: dict[int, tuple[int, asyncio.Task[None]]] = {}
 
     async def start(self) -> list[FlushOutcome]:
-        """Start the merge timer scheduler and immediately flush any past-due open batches."""
+        """Start background scheduler and recover overdue debounce or interrupted immediate batches."""
         self._loop = asyncio.get_running_loop()
         self._wakeup = asyncio.Event()
         self._flush_lock = asyncio.Lock()
@@ -60,17 +63,25 @@ class SupportPipeline:
 
         recovered = await self.flush_due_now()
         self._scheduler_task = self._loop.create_task(self._scheduler_loop(), name="support-merge-scheduler")
+
+        pending_immediate = await asyncio.to_thread(self.store.recover_immediate_batches)
+        for batch in pending_immediate:
+            self._spawn_immediate_task(batch.batch_id, batch.generation)
+
         next_deadline = self.store.next_open_deadline()
         _LOGGER.info(
-            "Support pipeline started: recovered_batches=%d pending_open_deadline=%s auto_reply=%s",
+            "Support pipeline started: merge_enabled=%s max_preempts=%d recovered_open=%d recovered_immediate=%d pending_open_deadline=%s auto_reply=%s",
+            str(self.store.merge_enabled).lower(),
+            self.store.max_preempts,
             len(recovered),
+            len(pending_immediate),
             f"{next_deadline:.3f}" if next_deadline is not None else "-",
             str(self.auto_reply_enabled).lower(),
         )
         return recovered
 
     async def stop(self) -> None:
-        """Stop the background scheduler cleanly while leaving open batches persisted for restart."""
+        """Stop timers and cancel in-flight immediate tasks while keeping SQLite batches recoverable."""
         self._stop_requested = True
         if self._wakeup is not None:
             self._wakeup.set()
@@ -80,6 +91,13 @@ class SupportPipeline:
             except asyncio.CancelledError:
                 pass
             self._scheduler_task = None
+
+        active = [task for _, task in self._active_tasks.values()]
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
+        self._active_tasks.clear()
         self._wakeup = None
         self._loop = None
 
@@ -104,20 +122,21 @@ class SupportPipeline:
         decision = classify_message(msg_type=msg_type, content=content, event=event)
         result = self.store.ingest_event(payload, decision, client_ip=client_ip)
         _LOGGER.info(
-            "Support ingest persisted: seq=%d duplicate=%s category=%s reason=%s batch_id=%s count=%s",
+            "Support ingest persisted: seq=%d duplicate=%s category=%s reason=%s batch_id=%s count=%s gen=%s",
             result.seq,
             str(result.duplicate).lower(),
             result.filter_decision.category,
             _safe_token(result.filter_decision.reason) or "-",
             result.batch.batch_id if result.batch is not None else "-",
             result.batch.message_count if result.batch is not None else "-",
+            result.batch.generation if result.batch is not None else "-",
         )
         return result
 
     async def process_ingest_side_effects(self, result: IngestResult, payload: dict[str, Any]) -> None:
-        """Execute post-commit actions (contact/feedback replies, overdue pre-flushes, scheduler wakeup)."""
+        """Execute post-commit actions: contact/feedback replies, pre-flushes, or merge/preempt."""
         for pre in result.pre_flushed:
-            await self._handle_flushed_outcome(pre)
+            await self._dispatch_flushed_outcome(pre, run_triage=True)
 
         if result.duplicate:
             return
@@ -143,17 +162,106 @@ class SupportPipeline:
                 content=FEEDBACK_RECEIVED_REPLY,
             )
         elif category == "question" and result.batch is not None:
-            self.notify_scheduler()
+            if result.batch.status == "open":
+                self.notify_scheduler()
+            elif result.batch.status == "processing":
+                if result.preempted_batch_id is not None:
+                    self._cancel_batch_task(result.preempted_batch_id)
+                self._spawn_immediate_task(result.batch.batch_id, result.batch.generation)
 
     async def flush_due_now(self) -> list[FlushOutcome]:
-        """Flush all open batches whose deadline has arrived and run their downstream hooks."""
+        """Flush all open debounce batches whose deadline has arrived and run downstream hooks."""
         if self._flush_lock is None:
             self._flush_lock = asyncio.Lock()
         async with self._flush_lock:
             outcomes = await asyncio.to_thread(self.store.flush_due_batches)
             for outcome in outcomes:
-                await self._handle_flushed_outcome(outcome)
+                await self._dispatch_flushed_outcome(outcome, run_triage=True)
             return outcomes
+
+    async def wait_for_idle(self, timeout: float = 5.0) -> None:
+        """Await any currently running immediate generation tasks (primarily for testing/shutdown)."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while self._active_tasks:
+            tasks = [task for _, task in self._active_tasks.values()]
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            if remaining == 0.0:
+                raise asyncio.TimeoutError("Timed out waiting for immediate tasks")
+            await asyncio.wait(tasks, timeout=remaining)
+
+    def _cancel_batch_task(self, batch_id: int) -> None:
+        existing = self._active_tasks.get(batch_id)
+        if existing is not None:
+            _, task = existing
+            if not task.done():
+                task.cancel()
+
+    def _spawn_immediate_task(self, batch_id: int, expected_generation: int) -> None:
+        if self._loop is None or self._loop.is_closed() or self._stop_requested:
+            return
+        self._cancel_batch_task(batch_id)
+        task = self._loop.create_task(
+            self._run_immediate_task(batch_id, expected_generation),
+            name=f"support-immediate-{batch_id}-g{expected_generation}",
+        )
+        self._active_tasks[batch_id] = (expected_generation, task)
+
+    async def _run_triage(self, outcome: FlushOutcome) -> None:
+        if outcome.route_stage == "ready_for_triage" and self.triage_fn is not None:
+            res = self.triage_fn(outcome)
+            if inspect.isawaitable(res):
+                await res
+
+    async def _run_immediate_task(self, batch_id: int, expected_generation: int) -> None:
+        try:
+            prepared = await asyncio.to_thread(
+                self.store.prepare_immediate_generation, batch_id, expected_generation
+            )
+            if prepared is None:
+                return
+
+            try:
+                await self._run_triage(prepared)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Support immediate triage failed: batch_id=%d gen=%d reason=%s",
+                    batch_id,
+                    expected_generation,
+                    type(exc).__name__,
+                )
+
+            committed, promoted = await asyncio.to_thread(
+                self.store.commit_batch_generation,
+                batch_id,
+                expected_generation,
+                route_stage=prepared.route_stage,
+                staff_case_id=prepared.staff_case_id,
+                same_case_reason=prepared.same_case_reason,
+            )
+            if committed is None:
+                _LOGGER.info(
+                    "Support stale generation discarded before commit: batch_id=%d gen=%d",
+                    batch_id,
+                    expected_generation,
+                )
+                return
+
+            await self._dispatch_flushed_outcome(committed, run_triage=False)
+            if promoted is not None:
+                self._spawn_immediate_task(promoted.batch_id, promoted.generation)
+        except asyncio.CancelledError:
+            _LOGGER.info(
+                "Support in-flight generation preempted: batch_id=%d gen=%d",
+                batch_id,
+                expected_generation,
+            )
+            raise
+        finally:
+            tracked = self._active_tasks.get(batch_id)
+            if tracked is not None and tracked[0] == expected_generation:
+                self._active_tasks.pop(batch_id, None)
 
     async def _scheduler_loop(self) -> None:
         assert self._wakeup is not None
@@ -181,16 +289,27 @@ class SupportPipeline:
             except asyncio.TimeoutError:
                 pass
 
-    async def _handle_flushed_outcome(self, outcome: FlushOutcome) -> None:
+    async def _dispatch_flushed_outcome(self, outcome: FlushOutcome, *, run_triage: bool) -> None:
         _LOGGER.info(
-            "Support batch flushed: batch_id=%d count=%d route=%s case_id=%s reason=%s",
+            "Support batch flushed: batch_id=%d count=%d gen=%d preempts=%d route=%s case_id=%s reason=%s",
             outcome.batch.batch_id,
             outcome.batch.message_count,
+            outcome.batch.generation,
+            outcome.batch.preempt_count,
             outcome.route_stage,
             outcome.staff_case_id if outcome.staff_case_id is not None else "-",
             _safe_token(outcome.same_case_reason) or "-",
         )
-        if outcome.route_stage == "ready_for_triage" and self.on_batch_flushed is not None:
+        if run_triage:
+            try:
+                await self._run_triage(outcome)
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Support batch triage failed: batch_id=%d reason=%s",
+                    outcome.batch.batch_id,
+                    type(exc).__name__,
+                )
+        if self.on_batch_flushed is not None:
             try:
                 hook_result = self.on_batch_flushed(outcome)
                 if inspect.isawaitable(hook_result):

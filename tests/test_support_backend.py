@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import stat
 import tempfile
 import unittest
@@ -466,6 +467,211 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
 
         asyncio.run(run_http())
         self.assertIsNone(relay_receiver.app.state.support_pipeline)
+
+    def test_schema_v1_to_v2_migration_preserves_existing_rows(self):
+        conn = sqlite3.connect(self.db_path)
+        conn.executescript(
+            """
+            CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE feedback_records (
+                feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL, reader_id TEXT NOT NULL, event_seq INTEGER,
+                created_at_epoch REAL NOT NULL, created_at_utc TEXT NOT NULL,
+                content TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'recorded',
+                staff_note TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE staff_cases (
+                case_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL, reader_id TEXT NOT NULL,
+                source_batch_id INTEGER, source_event_seq INTEGER,
+                case_kind TEXT NOT NULL DEFAULT 'staff_todo', status TEXT NOT NULL DEFAULT 'open',
+                summary TEXT NOT NULL, latest_message TEXT NOT NULL,
+                created_at_epoch REAL NOT NULL, created_at_utc TEXT NOT NULL,
+                updated_at_epoch REAL NOT NULL, updated_at_utc TEXT NOT NULL,
+                closed_at_utc TEXT, resolution_note TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE merge_batches (
+                batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                account_id TEXT NOT NULL, reader_id TEXT NOT NULL, status TEXT NOT NULL,
+                first_received_at_epoch REAL NOT NULL, last_received_at_epoch REAL NOT NULL,
+                quiet_deadline_epoch REAL NOT NULL, max_deadline_epoch REAL NOT NULL,
+                flush_at_epoch REAL NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
+                merged_text TEXT, flushed_at_epoch REAL,
+                route_stage TEXT NOT NULL DEFAULT 'pending', staff_case_id INTEGER
+            );
+            CREATE UNIQUE INDEX idx_merge_open_reader ON merge_batches(account_id, reader_id) WHERE status = 'open';
+            INSERT INTO schema_meta(key, value) VALUES('schema_version', '1');
+            INSERT INTO merge_batches(
+                account_id, reader_id, status, first_received_at_epoch, last_received_at_epoch,
+                quiet_deadline_epoch, max_deadline_epoch, flush_at_epoch, message_count
+            ) VALUES ('gh_v1', 'o_v1', 'open', 100.0, 100.0, 103.0, 110.0, 103.0, 1);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        store = SupportStore(self.db_path, merge_enabled=False)
+        try:
+            b = store.get_batch(1)
+            self.assertIsNotNone(b)
+            self.assertEqual((b.generation, b.preempt_count, b.preempt_locked), (1, 0, False))
+            self.assertEqual(store.overview_metrics()["schema_version"], 2)
+        finally:
+            store.close()
+
+    def test_immediate_mode_preemption_barrier_cap_and_restart_recovery(self):
+        clock = FakeClock()
+        store = SupportStore(
+            self.db_path,
+            quiet_seconds=3.0,
+            max_wait_seconds=10.0,
+            merge_enabled=False,
+            max_preempts=2,
+            clock=clock,
+        )
+        r1 = store.ingest_event(
+            {"to_user": "gh_lib", "from_user": "o_r1", "msg_type": "text", "msg_id": "i1", "content": "你好请问"},
+            classify_message("text", "你好请问"),
+        )
+        self.assertEqual((r1.batch.status, r1.batch.generation, r1.batch.preempt_count), ("processing", 1, 0))
+
+        # Second message preempts generation 1 before commit.
+        clock.advance(0.5)
+        r2 = store.ingest_event(
+            {"to_user": "gh_lib", "from_user": "o_r1", "msg_type": "text", "msg_id": "i2", "content": "几点关门"},
+            classify_message("text", "几点关门"),
+        )
+        self.assertEqual(r2.preempted_batch_id, r1.batch.batch_id)
+        self.assertEqual((r2.batch.generation, r2.batch.preempt_count), (2, 1))
+
+        # Stale generation 1 commit barrier MUST reject.
+        stale_commit, _ = store.commit_batch_generation(r1.batch.batch_id, 1, route_stage="ready_for_triage")
+        self.assertIsNone(stale_commit)
+        self.assertEqual(store.get_batch(r1.batch.batch_id).status, "processing")
+
+        # Duplicate retry of i2 must NOT trigger a 2nd preempt.
+        r2_dup = store.ingest_event(
+            {"to_user": "gh_lib", "from_user": "o_r1", "msg_type": "text", "msg_id": "i2", "content": "几点关门"},
+            classify_message("text", "几点关门"),
+        )
+        self.assertTrue(r2_dup.duplicate)
+        self.assertEqual(store.get_batch(r1.batch.batch_id).preempt_count, 1)
+
+        # Third message hits preempt_count=2, fourth locks batch 1 and queues into batch 2.
+        r3 = store.ingest_event(
+            {"to_user": "gh_lib", "from_user": "o_r1", "msg_type": "text", "msg_id": "i3", "content": "东海岸校区"},
+            classify_message("text", "东海岸校区"),
+        )
+        self.assertEqual((r3.batch.generation, r3.batch.preempt_count), (3, 2))
+        r4 = store.ingest_event(
+            {"to_user": "gh_lib", "from_user": "o_r1", "msg_type": "text", "msg_id": "i4", "content": "另外明天开馆吗"},
+            classify_message("text", "另外明天开馆吗"),
+        )
+        self.assertEqual(r4.queued_behind_batch_id, r1.batch.batch_id)
+        self.assertEqual(r4.batch.status, "queued")
+        self.assertTrue(store.get_batch(r1.batch.batch_id).preempt_locked)
+
+        # Commit batch 1 gen 3 -> atomically promotes queued batch 2 to processing.
+        committed1, promoted = store.commit_batch_generation(r1.batch.batch_id, 3, route_stage="ready_for_triage")
+        self.assertEqual(committed1.batch.merged_text, "你好请问\n几点关门\n东海岸校区")
+        self.assertIsNotNone(promoted)
+        self.assertEqual((promoted.batch_id, promoted.status, promoted.merged_text), (r4.batch.batch_id, "processing", "另外明天开馆吗"))
+        store.close()
+
+        # Simulate process restart with unfinished batch 2 still in processing status.
+        flushed_texts: list[str] = []
+        store2 = SupportStore(self.db_path, merge_enabled=False, max_preempts=2, clock=clock)
+        pipeline2 = SupportPipeline(store2, on_batch_flushed=lambda out: flushed_texts.append(out.batch.merged_text or ""))
+
+        async def finish_recovery():
+            await pipeline2.start()
+            try:
+                await pipeline2.wait_for_idle(timeout=2.0)
+            finally:
+                await pipeline2.stop()
+                store2.close()
+
+        asyncio.run(finish_recovery())
+        self.assertEqual(flushed_texts, ["另外明天开馆吗"])
+
+    def test_immediate_async_preempt_cancels_slow_triage_and_delivers_once(self):
+        triage_started: list[str] = []
+        cancelled_runs: list[str] = []
+        committed_texts: list[str] = []
+
+        async def slow_triage(outcome):
+            text = outcome.batch.merged_text or ""
+            triage_started.append(text)
+            try:
+                await asyncio.sleep(0.12)
+            except asyncio.CancelledError:
+                cancelled_runs.append(text)
+                raise
+
+        store = SupportStore(self.db_path, merge_enabled=False, max_preempts=2)
+        pipeline = SupportPipeline(
+            store,
+            triage_fn=slow_triage,
+            on_batch_flushed=lambda out: committed_texts.append(out.batch.merged_text or ""),
+        )
+
+        async def scenario():
+            await pipeline.start()
+            try:
+                p1 = {"to_user": "gh_lib", "from_user": "o_imm", "msg_type": "text", "msg_id": "imm1", "content": "第一句"}
+                res1 = pipeline.ingest_sync(p1)
+                await pipeline.process_ingest_side_effects(res1, p1)
+                await asyncio.sleep(0.03)
+
+                p2 = {"to_user": "gh_lib", "from_user": "o_imm", "msg_type": "text", "msg_id": "imm2", "content": "第二句"}
+                res2 = pipeline.ingest_sync(p2)
+                await pipeline.process_ingest_side_effects(res2, p2)
+
+                await pipeline.wait_for_idle(timeout=2.0)
+            finally:
+                await pipeline.stop()
+                store.close()
+
+        asyncio.run(scenario())
+        self.assertEqual(triage_started, ["第一句", "第一句\n第二句"])
+        self.assertEqual(cancelled_runs, ["第一句"])
+        self.assertEqual(committed_texts, ["第一句\n第二句"])
+
+    def test_http_relay_wechat_with_merge_disabled_switch(self):
+        token = "immediate-http-token"
+        auth = {"authorization": f"Bearer {token}"}
+
+        async def run_http():
+            with (
+                patch.object(relay_receiver, "_AUTH_TOKEN", token),
+                patch.object(relay_receiver, "_LOG_PATH", self.log_path),
+                patch.object(relay_receiver, "_SUPPORT_DB_PATH_RAW", str(self.db_path)),
+                patch.object(relay_receiver, "_SUPPORT_MERGE_ENABLED", False),
+                patch.object(relay_receiver, "_SUPPORT_IMMEDIATE_MAX_PREEMPTS", 2),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ENABLED", False),
+            ):
+                async with relay_receiver._lifespan(relay_receiver.app):
+                    p = {"msg_type": "text", "msg_id": "hi1", "from_user": "o_fast", "to_user": "gh_1", "content": "怎么借书"}
+                    code, _ = await _async_asgi_request(
+                        relay_receiver.app,
+                        "POST",
+                        "/relay/wechat",
+                        body=json.dumps(p, ensure_ascii=False).encode("utf-8"),
+                        headers=auth,
+                    )
+                    self.assertEqual(code, 200)
+                    await relay_receiver.app.state.support_pipeline.wait_for_idle(timeout=2.0)
+
+                    _, ov_text = await _async_asgi_request(
+                        relay_receiver.app, "GET", "/relay/support/overview", headers=auth
+                    )
+                    overview = json.loads(ov_text)
+                    self.assertFalse(overview["merge_enabled"])
+                    self.assertEqual(overview["max_preempts"], 2)
+                    self.assertEqual(overview["open_batches"], 0)
+                    self.assertEqual(overview["flushed_batches"], 1)
+
+        asyncio.run(run_http())
 
 
 if __name__ == "__main__":

@@ -21,7 +21,9 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from support_backend import (
+    DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
+    DEFAULT_MERGE_ENABLED,
     DEFAULT_QUIET_SECONDS,
     SupportPipeline,
     SupportStore,
@@ -46,11 +48,26 @@ def _env_float(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
 _AUTH_TOKEN = os.environ.get("RELAY_AUTH_TOKEN", "")
 _LOG_PATH = Path(os.environ.get("RELAY_LOG_PATH", "data/relay-events.jsonl"))
 _SUPPORT_DB_PATH_RAW = os.environ.get("SUPPORT_DB_PATH", "").strip()
 _SUPPORT_QUIET_SECONDS = _env_float("SUPPORT_QUIET_SECONDS", DEFAULT_QUIET_SECONDS)
 _SUPPORT_MAX_WAIT_SECONDS = _env_float("SUPPORT_MAX_WAIT_SECONDS", DEFAULT_MAX_WAIT_SECONDS)
+_SUPPORT_MERGE_ENABLED = _env_bool("SUPPORT_MERGE_ENABLED", default=DEFAULT_MERGE_ENABLED)
+_SUPPORT_IMMEDIATE_MAX_PREEMPTS = _env_int(
+    "SUPPORT_IMMEDIATE_MAX_PREEMPTS", DEFAULT_MAX_PREEMPTS
+)
 _SUPPORT_AUTO_REPLY_ENABLED = _env_bool("SUPPORT_AUTO_REPLY_ENABLED", default=False)
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
@@ -404,6 +421,8 @@ async def _lifespan(application: FastAPI):
         db_path,
         quiet_seconds=_SUPPORT_QUIET_SECONDS,
         max_wait_seconds=max_wait_seconds,
+        merge_enabled=_SUPPORT_MERGE_ENABLED,
+        max_preempts=_SUPPORT_IMMEDIATE_MAX_PREEMPTS,
     )
     pipeline = SupportPipeline(
         support_store,
@@ -413,9 +432,11 @@ async def _lifespan(application: FastAPI):
     application.state.support_pipeline = pipeline
     await pipeline.start()
     _LOGGER.info(
-        "Relay receiver ready: log_path=%s db_path=%s has_direct_creds=%s auto_reply=%s direct_echo=%s cloud_echo=%s",
+        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d has_direct_creds=%s auto_reply=%s direct_echo=%s cloud_echo=%s",
         _LOG_PATH,
         db_path,
+        str(_SUPPORT_MERGE_ENABLED).lower(),
+        _SUPPORT_IMMEDIATE_MAX_PREEMPTS,
         str(bool(_APP_ID and _APP_SECRET)).lower(),
         str(_SUPPORT_AUTO_REPLY_ENABLED).lower(),
         str(bool(_DIRECT_ECHO_TEXT)).lower(),

@@ -16,6 +16,8 @@ EnvironmentFile=/root/Work/wechat_dev_test/.env
 EnvironmentFile=-/etc/wechat-relay.env
 Environment=RELAY_LOG_PATH=/var/lib/private/wechat-relay/relay-events.jsonl
 Environment=SUPPORT_DB_PATH=/var/lib/private/wechat-relay/library-support.db
+Environment=SUPPORT_MERGE_ENABLED=true
+Environment=SUPPORT_IMMEDIATE_MAX_PREEMPTS=2
 Environment=SUPPORT_AUTO_REPLY_ENABLED=false
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
