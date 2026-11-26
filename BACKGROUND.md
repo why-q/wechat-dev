@@ -58,6 +58,7 @@
 - 自有服务器侧新增独立接收端 `relay_receiver.py`，强制要求 `RELAY_AUTH_TOKEN` Bearer 鉴权，提供 `/healthz`、`/relay/wechat` 与 `/relay/events`，并将收到的消息及 `x-wx-*` 头以 `0600` 权限持久化到 JSONL（默认 `data/relay-events.jsonl`，已加入 `.gitignore`）。具体操作见 [云托管转发测试管道](docs/CLOUD-FORWARD-TEST-PIPELINE.md)。
 - 首次实测确认云托管公网转发成功：事件与文本消息均以 JSON 送达，携带 `x-wx-appid`、`x-wx-env`、`x-wx-openid`、`x-wx-region`、`x-wx-service`、`x-wx-source`（实测值为 `other`），且 `event` 类型无 `MsgId`。
 - 下一步在 `app.py` 增加可选云头校验（`WECHAT_CLOUD_EXPECTED_SOURCE` / `ENV` / `APPID`）与 `errmsg` 安全日志，在 `relay_receiver.py` 新增直连 `custom/send` 测试接口 `/relay/send-test` 及受控云调用回发测试钩子，并配套 `wechat-relay.service` 与 Nginx HTTPS（`wechat-dev.llink.cyou`）配置以完成出站手机送达验收。
+- **2026-11-26 双向闭环实测通过**：已确认「手机私信 -> 微信云托管 -> HTTPS 自有服务器（`wechat-relay.service`）-> 自有服务器直连 `custom/send` -> 手机真实收到回复」全链路跑通；后续消息处理与回发可全部驻留自有服务器。同时观测到公众号日常会产生大量 `msg_type="event"`（如自定义菜单 `Event="VIEW"`，无 `Content` 和 `MsgId`），需在下一步的 `Filter` 中按 [图书馆智能客服设计](docs/LIBRARY-SUPPORT-DESIGN.md) 过滤。
 
 ## Reference
 
