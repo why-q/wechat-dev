@@ -29,14 +29,19 @@
    - `POST /relay/send-test`：需 Bearer 鉴权，传入 `{"seq": 2, "text": "..."}`（或 `to_user`），使用 `WECHAT_APP_ID` + `WECHAT_APP_SECRET` 直连 `https://api.weixin.qq.com/cgi-bin/message/custom/send`（含 `access_token` 缓存与 `40001` 单次刷新重试），返回 `errcode`、`errmsg` 与耗时。
 
 3. **Nginx HTTPS 与 systemd（[deploy/nginx-wechat-dev-test.conf](../deploy/nginx-wechat-dev-test.conf) · [wechat-relay.service](../wechat-relay.service)）**
-   - Nginx 在 `443 ssl`（使用 `/etc/ssl/nginx/cert.pem` 覆盖 `*.llink.cyou`）反代 `/healthz`、`/relay/wechat`、`/relay/events`、`/relay/send-test` 到 `127.0.0.1:8090`；80 端口仅保留 `/wechat` 回滚入口，不暴露 `/relay/*`。
-   - `wechat-relay.service` 使用 `DynamicUser=yes`、`StateDirectory=wechat-relay`，读取 `.env` 与可选 `/etc/wechat-relay.env`，将数据保存在 `/var/lib/private/wechat-relay/relay-events.jsonl`。
+   - Nginx 在 `80` 与 `443 ssl`（使用 `/etc/ssl/nginx/cert.pem` 覆盖 `*.llink.cyou`）统一反代 `/healthz`、`/relay/wechat`、`/relay/events`、`/relay/send-test` 到 `127.0.0.1:8090`（同时兼容 Cloudflare Flexible 到源站 80 与 Full / Full (Strict) 到源站 443；生产建议在 Cloudflare 将 SSL/TLS 模式设为 Full (Strict) 以保证回源加密），并保留 `/wechat` 回滚入口。
+   - `wechat-relay.service` 使用 `DynamicUser=yes`、`StateDirectory=wechat-relay`，读取 `.env` 与可选 `/etc/wechat-relay.env`（格式须为 `RELAY_AUTH_TOKEN=...` 键值对），将数据保存在 `/var/lib/private/wechat-relay/relay-events.jsonl`。
 
 ## 验证操作步骤
 
 ### 1. 服务器启用 HTTPS 与 systemd
 
-1. 将共享 `RELAY_AUTH_TOKEN` 写入权限为 `0600` 的 `/etc/wechat-relay.env`（不要写入 Git）。
+1. 将共享 `RELAY_AUTH_TOKEN` 以 `KEY=VALUE` 格式写入权限为 `0600` 的 `/etc/wechat-relay.env`（不要写入 Git）：
+
+```bash
+sudo install -m 0600 /dev/null /etc/wechat-relay.env
+printf 'RELAY_AUTH_TOKEN=%s\n' '<与云托管 WECHAT_FORWARD_TOKEN 相同的值>' | sudo tee /etc/wechat-relay.env >/dev/null
+```
 2. 安装单元与 Nginx 配置并重启：
 
 ```bash
