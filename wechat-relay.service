@@ -1,0 +1,32 @@
+[Unit]
+Description=WeChat Cloud Hosting relay receiver service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+DynamicUser=yes
+WorkingDirectory=/srv/wechat-relay
+BindReadOnlyPaths=/root/Work/wechat_dev_test/relay_receiver.py:/srv/wechat-relay/relay_receiver.py
+BindReadOnlyPaths=/root/Work/wechat_dev_test/.venv:/srv/wechat-relay/.venv
+StateDirectory=wechat-relay
+StateDirectoryMode=0700
+EnvironmentFile=/root/Work/wechat_dev_test/.env
+EnvironmentFile=-/etc/wechat-relay.env
+Environment=RELAY_LOG_PATH=/var/lib/private/wechat-relay/relay-events.jsonl
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/srv/wechat-relay/.venv/bin/python -m uvicorn relay_receiver:app --app-dir /srv/wechat-relay --host 127.0.0.1 --port 8090 --no-access-log --no-server-header
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

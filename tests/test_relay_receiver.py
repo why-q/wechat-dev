@@ -200,6 +200,115 @@ class RelayReceiverTests(unittest.TestCase):
         self.assertEqual(event["content"], "云托管转发管道测试消息")
         self.assertEqual(event["wx_headers"], {"x-wx-source": "cloudbase"})
 
+    def test_send_test_resolves_seq_caches_token_and_retries_40001(self):
+        first = json.dumps(
+            {
+                "transport": "cloud",
+                "msg_type": "text",
+                "msg_id": "msg-send-1",
+                "from_user": "reader-open-id-xyz",
+                "content": "测试发送",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        calls = []
+        responses = iter([
+            {"access_token": "token-1", "expires_in": 7200},
+            {"errcode": 40001, "errmsg": "invalid credential"},
+            {"access_token": "token-2", "expires_in": 7200},
+            {"errcode": 0, "errmsg": "ok"},
+            {"errcode": 48001, "errmsg": "api unauthorized rid: 123"},
+        ])
+
+        def fake_request(url, payload=None):
+            calls.append((url, payload))
+            return next(responses)
+
+        relay_receiver._DIRECT_CLIENT.reset_cache()
+        with patch.object(relay_receiver, "_AUTH_TOKEN", "expected-token"):
+            with patch.object(relay_receiver, "_APP_ID", "wx-app-id"):
+                with patch.object(relay_receiver, "_APP_SECRET", "wx-app-secret"):
+                    auth = {"authorization": "Bearer expected-token"}
+                    r_in = self.client.request("POST", "/relay/wechat", body=first, headers=auth)
+                    self.assertEqual(r_in.status_code, 200)
+
+                    with patch.object(relay_receiver, "_request_json", side_effect=fake_request):
+                        with self.assertLogs("uvicorn.error", level="INFO") as captured_logs:
+                            r_ok = self.client.request(
+                                "POST",
+                                "/relay/send-test",
+                                body=json.dumps({"seq": 1, "text": "第一条测试回复"}).encode("utf-8"),
+                                headers=auth,
+                            )
+                            r_48001 = self.client.request(
+                                "POST",
+                                "/relay/send-test",
+                                body=json.dumps({"seq": 1, "text": "第二条测试回复"}).encode("utf-8"),
+                                headers=auth,
+                            )
+                        r_missing = self.client.request(
+                            "POST",
+                            "/relay/send-test",
+                            body=json.dumps({"seq": 999, "text": "不存在"}).encode("utf-8"),
+                            headers=auth,
+                        )
+
+        self.assertEqual(r_ok.status_code, 200)
+        ok_body = json.loads(r_ok.text)
+        self.assertTrue(ok_body["ok"])
+        self.assertEqual(ok_body["errcode"], 0)
+        self.assertEqual(ok_body["seq"], 1)
+
+        self.assertEqual(r_48001.status_code, 200)
+        err_body = json.loads(r_48001.text)
+        self.assertFalse(err_body["ok"])
+        self.assertEqual(err_body["errcode"], 48001)
+        self.assertIn("api unauthorized", err_body["errmsg"])
+
+        self.assertEqual(r_missing.status_code, 404)
+        self.assertEqual(len(calls), 5)
+        self.assertIn("access_token=token-2", calls[4][0])
+        logged = "\n".join(captured_logs.output)
+        self.assertNotIn("reader-open-id-xyz", logged)
+        self.assertNotIn("wx-app-secret", logged)
+        self.assertNotIn("token-2", logged)
+
+    def test_direct_echo_and_cloud_echo_test_hooks(self):
+        payload = json.dumps(
+            {
+                "transport": "cloud",
+                "msg_type": "text",
+                "msg_id": "echo-1",
+                "from_user": "reader-echo",
+                "content": "测试回声",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        with patch.object(relay_receiver, "_AUTH_TOKEN", "expected-token"):
+            with patch.object(relay_receiver, "_DIRECT_ECHO_TEXT", "直连回声"):
+                with patch.object(relay_receiver, "_CLOUD_ECHO_TEXT", "云端回声"):
+                    with patch.object(
+                        relay_receiver._DIRECT_CLIENT,
+                        "send_text",
+                        return_value={
+                            "ok": True,
+                            "errcode": 0,
+                            "errmsg": "ok",
+                            "duration_ms": 12,
+                            "mode": "direct_https",
+                        },
+                    ) as send_mock:
+                        auth = {"authorization": "Bearer expected-token"}
+                        r1 = self.client.request("POST", "/relay/wechat", body=payload, headers=auth)
+                        r2 = self.client.request("POST", "/relay/wechat", body=payload, headers=auth)
+
+        b1 = json.loads(r1.text)
+        b2 = json.loads(r2.text)
+        self.assertEqual(b1.get("cloud_test_reply"), "云端回声")
+        self.assertNotIn("cloud_test_reply", b2)
+        send_mock.assert_called_once_with("reader-echo", "直连回声")
+
 
 if __name__ == "__main__":
     unittest.main()

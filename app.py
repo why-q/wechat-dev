@@ -58,6 +58,9 @@ _TOKEN = os.environ.get("WECHAT_TOKEN", "")
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
 _CLOUD_PUSH_ENABLED = _env_flag("WECHAT_CLOUD_PUSH_ENABLED", False)
+_CLOUD_EXPECTED_SOURCE = os.environ.get("WECHAT_CLOUD_EXPECTED_SOURCE", "").strip()
+_CLOUD_EXPECTED_ENV = os.environ.get("WECHAT_CLOUD_EXPECTED_ENV", "").strip()
+_CLOUD_EXPECTED_APPID = os.environ.get("WECHAT_CLOUD_EXPECTED_APPID", "").strip()
 _AUTO_REPLY_ENABLED = _env_flag("WECHAT_AUTO_REPLY_ENABLED", True)
 _DASHBOARD_ENABLED = _env_flag("DASHBOARD_ENABLED", True)
 _WECHAT_OPEN_API_ENABLED = _env_flag("WECHAT_OPEN_API_ENABLED", False)
@@ -68,6 +71,7 @@ _FORWARD_TIMEOUT_SECONDS = _env_float(
     "WECHAT_FORWARD_TIMEOUT_SECONDS", 3.0, min_value=0.2, max_value=4.5
 )
 _FORWARD_FAIL_OPEN = _env_flag("WECHAT_FORWARD_FAIL_OPEN", True)
+_FORWARD_ALLOW_TEST_REPLY = _env_flag("WECHAT_FORWARD_ALLOW_TEST_REPLY", False)
 if not _TOKEN and not _CLOUD_PUSH_ENABLED:
     raise RuntimeError("WECHAT_TOKEN must be set unless Cloud Hosting push mode is enabled")
 
@@ -80,11 +84,18 @@ _HTTP_TIMEOUT_SECONDS = 5
 async def _lifespan(application: FastAPI):
     application.state.rag_responder = None
     if _FORWARD_URL:
+        header_checks = sum(
+            1
+            for item in (_CLOUD_EXPECTED_SOURCE, _CLOUD_EXPECTED_ENV, _CLOUD_EXPECTED_APPID)
+            if item
+        )
         _LOGGER.info(
-            "WeChat callback forwarder enabled: timeout_s=%.2f fail_open=%s has_token=%s",
+            "WeChat callback forwarder enabled: timeout_s=%.2f fail_open=%s has_token=%s allow_test_reply=%s cloud_header_checks=%d",
             _FORWARD_TIMEOUT_SECONDS,
             str(_FORWARD_FAIL_OPEN).lower(),
             str(bool(_FORWARD_TOKEN)).lower(),
+            str(_FORWARD_ALLOW_TEST_REPLY).lower(),
+            header_checks,
         )
     if _AUTO_REPLY_ENABLED:
         try:
@@ -286,6 +297,13 @@ def _get_access_token() -> str:
         return token
 
 
+def _safe_errmsg(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = "".join(ch if (ch.isascii() and (ch.isalnum() or ch in " .,:;-_/()")) else " " for ch in value)
+    return " ".join(cleaned.split())[:96]
+
+
 def _send_customer_message(to_user: str, content: str) -> bool:
     payload = {
         "touser": to_user,
@@ -319,10 +337,12 @@ def _send_customer_message(to_user: str, content: str) -> bool:
     if type(errcode) is not int or errcode != 0:
         duration_ms = round((time.monotonic() - request_started_at) * 1000)
         if type(errcode) is int:
+            errmsg = _safe_errmsg(result.get("errmsg"))
             _LOGGER.warning(
-                "WeChat delayed reply failed: mode=%s errcode=%d duration_ms=%d",
+                "WeChat delayed reply failed: mode=%s errcode=%d errmsg=%s duration_ms=%d",
                 mode,
                 errcode,
+                errmsg or "-",
                 duration_ms,
             )
         else:
@@ -493,6 +513,24 @@ _DASHBOARD_HTML = """<!doctype html>
 </body>
 </html>"""
 
+def _verify_cloud_headers(request: Request) -> None:
+    checks = (
+        ("x-wx-source", _CLOUD_EXPECTED_SOURCE),
+        ("x-wx-env", _CLOUD_EXPECTED_ENV),
+        ("x-wx-appid", _CLOUD_EXPECTED_APPID),
+    )
+    for header_name, expected in checks:
+        if not expected:
+            continue
+        actual = request.headers.get(header_name, "")
+        if not actual or not hmac.compare_digest(actual, expected):
+            _LOGGER.warning(
+                "WeChat cloud callback rejected: reason=header_mismatch header=%s",
+                header_name,
+            )
+            raise HTTPException(403, "invalid cloud push source")
+
+
 def _verify_signature(request: Request) -> None:
     if not _TOKEN:
         raise HTTPException(503, "signature verification is unavailable")
@@ -633,10 +671,10 @@ def _build_forward_envelope(
     }
 
 
-def _forward_callback(envelope: dict[str, object]) -> bool:
+def _forward_callback(envelope: dict[str, object]) -> tuple[bool, dict[str, object] | None]:
     target_url = _validate_forward_url(_FORWARD_URL)
     if not target_url:
-        return True
+        return True, None
     safe_type = _safe_msg_type(str(envelope.get("msg_type", "")))
     transport = "cloud" if envelope.get("transport") == "cloud" else "signed"
     started_at = time.monotonic()
@@ -653,7 +691,7 @@ def _forward_callback(envelope: dict[str, object]) -> bool:
     try:
         with urlopen(req, timeout=_FORWARD_TIMEOUT_SECONDS) as response:
             status = getattr(response, "status", 200)
-            response.read()
+            response_body = response.read()
     except HTTPError as exc:
         duration_ms = round((time.monotonic() - started_at) * 1000)
         _LOGGER.warning(
@@ -661,7 +699,7 @@ def _forward_callback(envelope: dict[str, object]) -> bool:
             exc.code,
             duration_ms,
         )
-        return False
+        return False, None
     except Exception as exc:
         duration_ms = round((time.monotonic() - started_at) * 1000)
         _LOGGER.warning(
@@ -669,7 +707,7 @@ def _forward_callback(envelope: dict[str, object]) -> bool:
             type(exc).__name__,
             duration_ms,
         )
-        return False
+        return False, None
 
     duration_ms = round((time.monotonic() - started_at) * 1000)
     if not (200 <= status < 300):
@@ -678,13 +716,21 @@ def _forward_callback(envelope: dict[str, object]) -> bool:
             status,
             duration_ms,
         )
-        return False
+        return False, None
+    parsed_response: dict[str, object] | None = None
+    if response_body:
+        try:
+            decoded = json.loads(response_body.decode("utf-8"))
+            if isinstance(decoded, dict):
+                parsed_response = decoded
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            parsed_response = None
     _LOGGER.info(
         "WeChat callback forward succeeded: status=%d duration_ms=%d",
         status,
         duration_ms,
     )
-    return True
+    return True, parsed_response
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -783,6 +829,7 @@ async def receive_callback(
         parsed_fields = _parse_cloud_callback_fields(raw_body)
         if parsed_fields is None:
             return PlainTextResponse("success", headers=_HEADERS)
+        _verify_cloud_headers(request)
     else:
         parsed_fields = _parse_xml_callback_fields(raw_body, allow_check=False)
         assert parsed_fields is not None
@@ -801,9 +848,20 @@ async def receive_callback(
             cloud_push=cloud_push,
             request=request,
         )
-        forwarded = await asyncio.to_thread(_forward_callback, envelope)
+        forwarded, forward_response = await asyncio.to_thread(_forward_callback, envelope)
         if not forwarded and not _FORWARD_FAIL_OPEN:
             raise HTTPException(502, "callback forward failed")
+        if (
+            forwarded
+            and _FORWARD_ALLOW_TEST_REPLY
+            and isinstance(forward_response, dict)
+            and not forward_response.get("duplicate")
+            and from_user
+        ):
+            test_reply = forward_response.get("cloud_test_reply")
+            if isinstance(test_reply, str) and test_reply.strip():
+                sent = await asyncio.to_thread(_send_customer_message, from_user, test_reply)
+                _LOGGER.info("WeChat forward test reply finished: sent=%s", str(sent).lower())
     if msg_type == "text":
         if not _AUTO_REPLY_ENABLED:
             return PlainTextResponse("success", headers=_HEADERS)

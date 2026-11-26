@@ -749,6 +749,138 @@ class CallbackDashboardTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             wechat_app._validate_forward_url("https://user:pass@example.com/relay")
 
+    def test_cloud_expected_headers_reject_mismatches_but_allow_container_check(self):
+        text_body = json.dumps(
+            {
+                "ToUserName": "official-id",
+                "FromUserName": "reader-id",
+                "MsgType": "text",
+                "Content": "你好",
+                "MsgId": "hdr-1",
+            }
+        ).encode("utf-8")
+        with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+            with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+                with patch.object(wechat_app, "_CLOUD_EXPECTED_SOURCE", "other"):
+                    with patch.object(wechat_app, "_CLOUD_EXPECTED_ENV", "prod-env"):
+                        with patch.object(wechat_app, "_CLOUD_EXPECTED_APPID", "wx-app-1"):
+                            check = self.client.request(
+                                "POST",
+                                "/wechat",
+                                body=b'{"action":"CheckContainerPath"}',
+                                headers={"x-wx-source": "cloudbase"},
+                            )
+                            self.assertEqual((check.status_code, check.text), (200, "success"))
+
+                            bad = self.client.request(
+                                "POST",
+                                "/wechat",
+                                body=text_body,
+                                headers={
+                                    "x-wx-source": "other",
+                                    "x-wx-env": "wrong-env",
+                                    "x-wx-appid": "wx-app-1",
+                                },
+                            )
+                            self.assertEqual(bad.status_code, 403)
+
+                            good = self.client.request(
+                                "POST",
+                                "/wechat",
+                                body=text_body,
+                                headers={
+                                    "x-wx-source": "other",
+                                    "x-wx-env": "prod-env",
+                                    "x-wx-appid": "wx-app-1",
+                                },
+                            )
+                            self.assertEqual((good.status_code, good.text), (200, "success"))
+
+    def test_forward_allow_test_reply_sends_only_when_enabled_and_not_duplicate(self):
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, payload: bytes):
+                self._payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return self._payload
+
+        body = json.dumps(
+            {
+                "ToUserName": "official-id",
+                "FromUserName": "reader-open-id",
+                "MsgType": "text",
+                "Content": "测试回复",
+                "MsgId": "reply-1",
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        with patch.object(wechat_app, "_CLOUD_PUSH_ENABLED", True):
+            with patch.object(wechat_app, "_AUTO_REPLY_ENABLED", False):
+                with patch.object(
+                    wechat_app, "_FORWARD_URL", "https://receiver.invalid/relay/wechat"
+                ):
+                    with patch.object(wechat_app, "_FORWARD_ALLOW_TEST_REPLY", True):
+                        with patch.object(
+                            wechat_app,
+                            "urlopen",
+                            return_value=FakeResponse(
+                                json.dumps(
+                                    {
+                                        "ok": True,
+                                        "duplicate": False,
+                                        "cloud_test_reply": "测试回包",
+                                    },
+                                    ensure_ascii=False,
+                                ).encode("utf-8")
+                            ),
+                        ):
+                            with patch.object(
+                                wechat_app, "_send_customer_message", return_value=True
+                            ) as send:
+                                r1 = self.client.request(
+                                    "POST",
+                                    "/wechat",
+                                    body=body,
+                                    headers={"x-wx-source": "other"},
+                                )
+                        self.assertEqual((r1.status_code, r1.text), (200, "success"))
+                        send.assert_called_once_with("reader-open-id", "测试回包")
+
+                        with patch.object(
+                            wechat_app,
+                            "urlopen",
+                            return_value=FakeResponse(
+                                json.dumps(
+                                    {
+                                        "ok": True,
+                                        "duplicate": True,
+                                        "cloud_test_reply": "测试回包",
+                                    },
+                                    ensure_ascii=False,
+                                ).encode("utf-8")
+                            ),
+                        ):
+                            with patch.object(
+                                wechat_app, "_send_customer_message", return_value=True
+                            ) as send_dup:
+                                r2 = self.client.request(
+                                    "POST",
+                                    "/wechat",
+                                    body=body,
+                                    headers={"x-wx-source": "other"},
+                                )
+                        self.assertEqual((r2.status_code, r2.text), (200, "success"))
+                        send_dup.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
