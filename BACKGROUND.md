@@ -67,6 +67,7 @@
 - **3s 静默 / 10s 上限合并与重启恢复**：按 `(account_id, reader_id)` 建唯一 `open` 批次并基于服务端接收时间计时；按 `(account_id, MsgId)` 去重且重复投递不重置计时；服务重启自动立即冲刷已逾期批次并按剩余秒数续调未到期批次；冲刷后检查 `Same Unresolved Staff Case?` 决定追加已有 `staff_todo` 待办或进入后续分诊。
 - **安全影子默认模式**：`wechat-relay.service` 默认配置 `SUPPORT_AUTO_REPLY_ENABLED=false`（将回复写入 `outbound_replies(status='shadow')`，暂不主动对外发送），并已重启实测捕获线上真实 `event:VIEW` 推送且保持 `49` 项单测全通过；详细设计与新增 `/relay/support/*` 接口见 [Step 2 文档](docs/STEP2-FILTER-AND-MERGE-PIPELINE.md)。
 - **2026-11-26 · 实测消息分布与立即抢占模式切换为默认**：项目负责人指出在现有 80 余名读者留言样本中仅 2 名发出多条连续消息（且均不超过 3 条）；强制对全部读者等待 3 秒会在多数单条提问上引入无谓延迟。据此已将系统与 `wechat-relay.service` 默认值切换为 `SUPPORT_MERGE_ENABLED=false`（立即启动 + 未提交前新消息追加并取消重跑），`SUPPORT_MERGE_ENABLED=true` 保留作可选 3s/10s 合并回退；配合 `SUPPORT_IMMEDIATE_MAX_PREEMPTS=2`（对应最多 3 条连续输入，超限锁批并入 `queued` 接力）与 `generation` 提交屏障防止双发与过期写入，并兼容迁移线上既有 SQLite 数据库（`SCHEMA_VERSION=2`）。
+- **2026-11-26 · Tier 1 决策模型选型（`decision-model-preview`）**：确认国内/可用中转已提供兼容 `/v1/systemone` 协议的 `decision-model-preview` 模型，原生支持 `choice`、`noul`、`score` 多题单次调用并返回各选项概率与置信度（仅按输入 token 计费；`base_url` 填站点根地址不带 `/v1`）。第 3 步 Tier 1 路由将直接对接 `POST {base_url}/v1/systemone` 一次同时判定下一步分流与 `1.` 固定答案匹配，保留 `2s` 超时降级到 Tier 2 `0.` 语料 RAG。
 
 ## Reference
 
