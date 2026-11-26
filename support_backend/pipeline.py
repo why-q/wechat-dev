@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable
 import inspect
 import logging
 from typing import Any, Awaitable, Callable
@@ -39,6 +40,7 @@ class SupportPipeline:
         *,
         send_text_fn: SendTextFn | None = None,
         auto_reply_enabled: bool = False,
+        auto_reply_allowlist: Iterable[str] | None = None,
         triage_fn: BatchFlushedHook | None = None,
         commit_handler: CommitHandlerHook | None = None,
         on_batch_flushed: BatchFlushedHook | None = None,
@@ -46,6 +48,11 @@ class SupportPipeline:
         self.store = store
         self.send_text_fn = send_text_fn
         self.auto_reply_enabled = auto_reply_enabled
+        self.auto_reply_allowlist: frozenset[str] = (
+            frozenset(item.strip() for item in auto_reply_allowlist if isinstance(item, str) and item.strip())
+            if auto_reply_allowlist is not None
+            else frozenset()
+        )
         self.triage_fn = triage_fn
         self.commit_handler = commit_handler
         self.on_batch_flushed = on_batch_flushed
@@ -368,7 +375,13 @@ class SupportPipeline:
         trigger_ref_id: int | None,
         content: str,
     ) -> int:
+        shadow_reason: str | None = None
         if not self.auto_reply_enabled or self.send_text_fn is None:
+            shadow_reason = "disabled"
+        elif self.auto_reply_allowlist and reader_id not in self.auto_reply_allowlist:
+            shadow_reason = "not_in_allowlist"
+
+        if shadow_reason is not None:
             reply_id = self.store.record_outbound_reply(
                 account_id=account_id,
                 reader_id=reader_id,
@@ -379,10 +392,11 @@ class SupportPipeline:
                 status="shadow",
             )
             _LOGGER.info(
-                "Support reply recorded in shadow mode: reply_id=%d trigger=%s ref_id=%s",
+                "Support reply recorded in shadow mode: reply_id=%d trigger=%s ref_id=%s reason=%s",
                 reply_id,
                 trigger_kind,
                 trigger_ref_id if trigger_ref_id is not None else "-",
+                shadow_reason,
             )
             return reply_id
 

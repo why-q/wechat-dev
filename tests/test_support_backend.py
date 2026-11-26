@@ -676,6 +676,105 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
 
         asyncio.run(run_http())
 
+    def test_auto_reply_allowlist_sends_only_to_allowed_readers_and_shadows_others(self):
+        sent_calls: list[tuple[str, str]] = []
+
+        def fake_send(to_user: str, content: str) -> dict[str, object]:
+            sent_calls.append((to_user, content))
+            return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 8, "mode": "direct_https"}
+
+        store = SupportStore(self.db_path, merge_enabled=False)
+        pipeline = SupportPipeline(
+            store,
+            send_text_fn=fake_send,
+            auto_reply_enabled=True,
+            auto_reply_allowlist=["o_allowed_tester"],
+        )
+
+        async def scenario():
+            await pipeline.start()
+            try:
+                for mid, reader, content in [
+                    ("a1", "o_allowed_tester", "建议三楼增加电源"),
+                    ("a2", "o_regular_reader", "建议四楼增加座位"),
+                ]:
+                    payload = {
+                        "to_user": "gh_lib",
+                        "from_user": reader,
+                        "msg_type": "text",
+                        "msg_id": mid,
+                        "content": content,
+                    }
+                    res = pipeline.ingest_sync(payload)
+                    await pipeline.process_ingest_side_effects(res, payload)
+                await pipeline.wait_for_idle(timeout=2.0)
+            finally:
+                await pipeline.stop()
+
+        asyncio.run(scenario())
+        self.assertEqual(len(sent_calls), 1)
+        self.assertEqual(sent_calls[0][0], "o_allowed_tester")
+        replies = store.list_outbound_replies(limit=10)
+        statuses_by_reader = {r["reader_id"]: r["status"] for r in replies}
+        self.assertEqual(statuses_by_reader["o_allowed_tester"], "sent")
+        self.assertEqual(statuses_by_reader["o_regular_reader"], "shadow")
+        store.close()
+
+    def test_http_support_auto_reply_allowlist_via_lifespan(self):
+        token = "allowlist-http-token"
+        auth = {"authorization": f"Bearer {token}"}
+        sent_calls: list[tuple[str, str]] = []
+
+        def fake_send(to_user: str, content: str) -> dict[str, object]:
+            sent_calls.append((to_user, content))
+            return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 11, "mode": "direct_https"}
+
+        async def run_http():
+            parsed = relay_receiver._parse_allowlist("o_tester_vip, o_tester_2")
+            self.assertEqual(parsed, frozenset({"o_tester_vip", "o_tester_2"}))
+            with (
+                patch.object(relay_receiver, "_AUTH_TOKEN", token),
+                patch.object(relay_receiver, "_LOG_PATH", self.log_path),
+                patch.object(relay_receiver, "_SUPPORT_DB_PATH_RAW", str(self.db_path)),
+                patch.object(relay_receiver, "_SUPPORT_MERGE_ENABLED", False),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ENABLED", True),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ALLOWLIST", parsed),
+                patch.object(relay_receiver._DIRECT_CLIENT, "send_text", side_effect=fake_send),
+            ):
+                async with relay_receiver._lifespan(relay_receiver.app):
+                    with self.assertLogs("uvicorn.error", level="INFO") as captured:
+                        for mid, reader, text in [
+                            ("vip1", "o_tester_vip", "开馆时间？"),
+                            ("reg1", "o_public_user", "开馆时间？"),
+                        ]:
+                            await _asgi_req_payload(mid, reader, text)
+                        await relay_receiver.app.state.support_pipeline.wait_for_idle(timeout=2.0)
+
+                    logs_joined = "\n".join(captured.output)
+                    self.assertNotIn("o_tester_vip", logs_joined)
+                    self.assertNotIn("o_public_user", logs_joined)
+
+                    _, ov_text = await _async_asgi_request(
+                        relay_receiver.app, "GET", "/relay/support/overview", headers=auth
+                    )
+                    self.assertNotIn("o_tester_vip", ov_text)
+                    overview = json.loads(ov_text)
+                    self.assertTrue(overview["auto_reply_enabled"])
+                    self.assertEqual(overview["auto_reply_allowlist_count"], 2)
+                    self.assertEqual(overview["outbound_replies"], {"sent": 1, "shadow": 1})
+
+        async def _asgi_req_payload(mid: str, reader: str, text: str):
+            body = json.dumps(
+                {"msg_type": "text", "msg_id": mid, "from_user": reader, "to_user": "gh_lib", "content": text},
+                ensure_ascii=False,
+            ).encode("utf-8")
+            code, _ = await _async_asgi_request(relay_receiver.app, "POST", "/relay/wechat", body=body, headers=auth)
+            self.assertEqual(code, 200)
+
+        asyncio.run(run_http())
+        self.assertEqual(len(sent_calls), 1)
+        self.assertEqual(sent_calls[0][0], "o_tester_vip")
+
 
 if __name__ == "__main__":
     unittest.main()

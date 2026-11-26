@@ -32,6 +32,7 @@
 - `SUPPORT_DECISION_BASE_URL` / `SUPPORT_DECISION_API_KEY` / `SUPPORT_DECISION_MODEL`（默认 `decision-model-preview`）/ `SUPPORT_DECISION_TIMEOUT_SECONDS`（按线上实测耗时校准为默认 `3.0`）
 - `SUPPORT_CORPUS_DIR`（默认 `rag-poc/corpus`）、`SUPPORT_INDEX_DIR`（默认 `rag-poc/index_v2`，仅 `0.` 索引）
 - `SUPPORT_PRESET_MIN_CONFIDENCE`（默认 `0.65`）、`SUPPORT_LONG_ANSWER_CHARS`（默认 `220`）
+- `SUPPORT_AUTO_REPLY_ENABLED`（默认 `false`）与 `SUPPORT_AUTO_REPLY_ALLOWLIST`（可选逗号分隔 OpenID 列表；开启 `SUPPORT_AUTO_REPLY_ENABLED=true` 且配置白名单时仅白名单用户触发真实 `custom/send`，其余读者保留 `status='shadow'` 记录）
 - `SUPPORT_TIER2_ENABLED`（默认 `true`）、`SUPPORT_TIER2_TOP_K`（默认 `4`）、`SUPPORT_TIER2_MIN_SCORE`（默认 `0.2`）
 - `RAG_NLTK_DATA_DIR`：systemd 下设 `/var/lib/private/wechat-relay/nltk_data`，确保 `nltk.pathsec` 在 `DynamicUser=yes` 下满足单硬链与属主一致。
 

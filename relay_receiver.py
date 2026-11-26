@@ -79,7 +79,15 @@ _SUPPORT_MERGE_ENABLED = _env_bool("SUPPORT_MERGE_ENABLED", default=DEFAULT_MERG
 _SUPPORT_IMMEDIATE_MAX_PREEMPTS = _env_int(
     "SUPPORT_IMMEDIATE_MAX_PREEMPTS", DEFAULT_MAX_PREEMPTS
 )
+def _parse_allowlist(raw: str) -> frozenset[str]:
+    normalized = raw.replace(";", ",").replace("\n", ",")
+    return frozenset(token.strip() for token in normalized.split(",") if token.strip())
+
+
 _SUPPORT_AUTO_REPLY_ENABLED = _env_bool("SUPPORT_AUTO_REPLY_ENABLED", default=False)
+_SUPPORT_AUTO_REPLY_ALLOWLIST = _parse_allowlist(
+    os.environ.get("SUPPORT_AUTO_REPLY_ALLOWLIST", "")
+)
 _SUPPORT_CORPUS_DIR_RAW = os.environ.get("SUPPORT_CORPUS_DIR", "rag-poc/corpus").strip()
 _SUPPORT_INDEX_DIR_RAW = os.environ.get("SUPPORT_INDEX_DIR", "rag-poc/index_v2").strip()
 _SUPPORT_DECISION_BASE_URL = os.environ.get("SUPPORT_DECISION_BASE_URL", "").strip()
@@ -511,6 +519,7 @@ async def _lifespan(application: FastAPI):
         support_store,
         send_text_fn=_DIRECT_CLIENT.send_text,
         auto_reply_enabled=_SUPPORT_AUTO_REPLY_ENABLED,
+        auto_reply_allowlist=_SUPPORT_AUTO_REPLY_ALLOWLIST,
         triage_fn=responder.triage,
     )
     pipeline.commit_handler = lambda outcome, plan: responder.apply_committed_plan(
@@ -520,7 +529,7 @@ async def _lifespan(application: FastAPI):
     application.state.support_pipeline = pipeline
     await pipeline.start()
     _LOGGER.info(
-        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d presets=%d decision_ready=%s tier2_ready=%s has_direct_creds=%s auto_reply=%s direct_echo=%s cloud_echo=%s",
+        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d presets=%d decision_ready=%s tier2_ready=%s has_direct_creds=%s auto_reply=%s allowlist_count=%d direct_echo=%s cloud_echo=%s",
         _LOG_PATH,
         db_path,
         str(_SUPPORT_MERGE_ENABLED).lower(),
@@ -530,6 +539,7 @@ async def _lifespan(application: FastAPI):
         str(knowledge_responder is not None).lower(),
         str(bool(_APP_ID and _APP_SECRET)).lower(),
         str(_SUPPORT_AUTO_REPLY_ENABLED).lower(),
+        len(pipeline.auto_reply_allowlist),
         str(bool(_DIRECT_ECHO_TEXT)).lower(),
         str(bool(_CLOUD_ECHO_TEXT)).lower(),
     )
@@ -675,6 +685,7 @@ async def support_overview(request: Request) -> JSONResponse:
     return JSONResponse(
         {
             "auto_reply_enabled": pipeline.auto_reply_enabled,
+            "auto_reply_allowlist_count": len(pipeline.auto_reply_allowlist),
             "preset_count": len(responder.preset_catalog.presets) if responder is not None else 0,
             "decision_router_ready": bool(responder is not None and responder.decision_client is not None),
             "tier2_ready": bool(responder is not None and responder.knowledge_responder is not None),

@@ -25,7 +25,6 @@ Environment=SUPPORT_INDEX_DIR=/srv/wechat-relay/rag-poc/index_v2
 Environment=RAG_NLTK_DATA_DIR=/var/lib/private/wechat-relay/nltk_data
 Environment=SUPPORT_MERGE_ENABLED=false
 Environment=SUPPORT_IMMEDIATE_MAX_PREEMPTS=2
-Environment=SUPPORT_AUTO_REPLY_ENABLED=false
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/srv/wechat-relay/.venv/bin/python -m uvicorn relay_receiver:app --app-dir /srv/wechat-relay --host 127.0.0.1 --port 8090 --no-access-log --no-server-header
