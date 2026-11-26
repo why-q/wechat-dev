@@ -11,7 +11,8 @@ from .db import FlushOutcome, IngestResult, SupportStore
 from .filters import EMERGENCY_CONTACT_REPLY, FEEDBACK_RECEIVED_REPLY, classify_message
 
 SendTextFn = Callable[[str, str], dict[str, Any]]
-BatchFlushedHook = Callable[[FlushOutcome], Awaitable[None] | None]
+BatchFlushedHook = Callable[[FlushOutcome], Awaitable[Any] | Any]
+CommitHandlerHook = Callable[[FlushOutcome, Any], Awaitable[None] | None]
 
 _LOGGER = logging.getLogger("uvicorn.error")
 
@@ -39,12 +40,14 @@ class SupportPipeline:
         send_text_fn: SendTextFn | None = None,
         auto_reply_enabled: bool = False,
         triage_fn: BatchFlushedHook | None = None,
+        commit_handler: CommitHandlerHook | None = None,
         on_batch_flushed: BatchFlushedHook | None = None,
     ) -> None:
         self.store = store
         self.send_text_fn = send_text_fn
         self.auto_reply_enabled = auto_reply_enabled
         self.triage_fn = triage_fn
+        self.commit_handler = commit_handler
         self.on_batch_flushed = on_batch_flushed
 
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -206,11 +209,13 @@ class SupportPipeline:
         )
         self._active_tasks[batch_id] = (expected_generation, task)
 
-    async def _run_triage(self, outcome: FlushOutcome) -> None:
+    async def _run_triage(self, outcome: FlushOutcome) -> Any:
         if outcome.route_stage == "ready_for_triage" and self.triage_fn is not None:
             res = self.triage_fn(outcome)
             if inspect.isawaitable(res):
-                await res
+                return await res
+            return res
+        return None
 
     async def _run_immediate_task(self, batch_id: int, expected_generation: int) -> None:
         try:
@@ -220,8 +225,9 @@ class SupportPipeline:
             if prepared is None:
                 return
 
+            triage_result: Any = None
             try:
-                await self._run_triage(prepared)
+                triage_result = await self._run_triage(prepared)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -248,7 +254,9 @@ class SupportPipeline:
                 )
                 return
 
-            await self._dispatch_flushed_outcome(committed, run_triage=False)
+            await self._dispatch_flushed_outcome(
+                committed, run_triage=False, triage_result=triage_result
+            )
             if promoted is not None:
                 self._spawn_immediate_task(promoted.batch_id, promoted.generation)
         except asyncio.CancelledError:
@@ -289,7 +297,9 @@ class SupportPipeline:
             except asyncio.TimeoutError:
                 pass
 
-    async def _dispatch_flushed_outcome(self, outcome: FlushOutcome, *, run_triage: bool) -> None:
+    async def _dispatch_flushed_outcome(
+        self, outcome: FlushOutcome, *, run_triage: bool, triage_result: Any = None
+    ) -> None:
         _LOGGER.info(
             "Support batch flushed: batch_id=%d count=%d gen=%d preempts=%d route=%s case_id=%s reason=%s",
             outcome.batch.batch_id,
@@ -302,10 +312,21 @@ class SupportPipeline:
         )
         if run_triage:
             try:
-                await self._run_triage(outcome)
+                triage_result = await self._run_triage(outcome)
             except Exception as exc:
                 _LOGGER.warning(
                     "Support batch triage failed: batch_id=%d reason=%s",
+                    outcome.batch.batch_id,
+                    type(exc).__name__,
+                )
+        if self.commit_handler is not None:
+            try:
+                commit_res = self.commit_handler(outcome, triage_result)
+                if inspect.isawaitable(commit_res):
+                    await commit_res
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Support batch commit handler failed: batch_id=%d reason=%s",
                     outcome.batch.batch_id,
                     type(exc).__name__,
                 )
@@ -320,6 +341,23 @@ class SupportPipeline:
                     outcome.batch.batch_id,
                     type(exc).__name__,
                 )
+
+    async def deliver_reply(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        trigger_kind: str,
+        trigger_ref_id: int | None,
+        content: str,
+    ) -> int:
+        return await self._deliver_reply(
+            account_id=account_id,
+            reader_id=reader_id,
+            trigger_kind=trigger_kind,
+            trigger_ref_id=trigger_ref_id,
+            content=content,
+        )
 
     async def _deliver_reply(
         self,

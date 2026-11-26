@@ -14,12 +14,13 @@ from typing import Any, Callable
 
 from .filters import FilterDecision, default_same_case_matcher
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 DEFAULT_QUIET_SECONDS = 3.0
 DEFAULT_MAX_WAIT_SECONDS = 10.0
 DEFAULT_MERGE_ENABLED = False
 DEFAULT_MAX_PREEMPTS = 2
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 3600
+DEFAULT_CLARIFICATION_TTL_SECONDS = 1800.0
 
 SameCaseMatcher = Callable[[str, dict[str, Any], float], tuple[bool, str]]
 
@@ -171,6 +172,40 @@ class IngestResult:
     queued_behind_batch_id: int | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ClarificationSnapshot:
+    """Active or historical single-turn clarification record for a reader."""
+
+    clarify_id: int
+    account_id: str
+    reader_id: str
+    status: str
+    original_batch_id: int | None
+    original_question: str
+    clarify_prompt: str
+    attempt_count: int
+    asked_at_epoch: float
+    asked_at_utc: str
+    expires_at_epoch: float
+    consumed_at_utc: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "clarify_id": self.clarify_id,
+            "account_id": self.account_id,
+            "reader_id": self.reader_id,
+            "status": self.status,
+            "original_batch_id": self.original_batch_id,
+            "original_question": self.original_question,
+            "clarify_prompt": self.clarify_prompt,
+            "attempt_count": self.attempt_count,
+            "asked_at_epoch": self.asked_at_epoch,
+            "asked_at_utc": self.asked_at_utc,
+            "expires_at_epoch": self.expires_at_epoch,
+            "consumed_at_utc": self.consumed_at_utc,
+        }
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -297,6 +332,46 @@ CREATE TABLE IF NOT EXISTS outbound_replies (
     errcode INTEGER,
     errmsg TEXT NOT NULL DEFAULT '',
     duration_ms INTEGER,
+    created_at_epoch REAL NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS clarification_states (
+    clarify_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL,
+    reader_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    original_batch_id INTEGER REFERENCES merge_batches(batch_id),
+    original_question TEXT NOT NULL,
+    clarify_prompt TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+    asked_at_epoch REAL NOT NULL,
+    asked_at_utc TEXT NOT NULL,
+    expires_at_epoch REAL NOT NULL,
+    consumed_at_utc TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_clarify_active_reader
+    ON clarification_states(account_id, reader_id)
+    WHERE status = 'awaiting_reply';
+
+CREATE TABLE IF NOT EXISTS triage_runs (
+    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL REFERENCES merge_batches(batch_id),
+    account_id TEXT NOT NULL,
+    reader_id TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 1,
+    clarified_already INTEGER NOT NULL DEFAULT 0,
+    stage_path TEXT NOT NULL,
+    decision_route TEXT NOT NULL DEFAULT '',
+    decision_preset_id TEXT NOT NULL DEFAULT '',
+    decision_confidence REAL,
+    decision_duration_ms INTEGER,
+    preset_id TEXT NOT NULL DEFAULT '',
+    source_url TEXT NOT NULL DEFAULT '',
+    section_title TEXT NOT NULL DEFAULT '',
+    reply_preview TEXT NOT NULL DEFAULT '',
+    staff_case_id INTEGER REFERENCES staff_cases(case_id),
     created_at_epoch REAL NOT NULL,
     created_at_utc TEXT NOT NULL
 );
@@ -1457,6 +1532,180 @@ class SupportStore:
                 item["messages"] = [dict(m) for m in msgs]
             return cases
 
+    def get_active_clarification(
+        self, account_id: str, reader_id: str, *, now_epoch: float | None = None
+    ) -> ClarificationSnapshot | None:
+        """Return unexpired pending clarification for `(account_id, reader_id)`, expiring stale ones."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE clarification_states
+                    SET status = 'expired'
+                    WHERE account_id = ? AND reader_id = ? AND status = 'awaiting_reply' AND expires_at_epoch <= ?
+                    """,
+                    (account_id or "default", reader_id, now_val),
+                )
+            row = self._conn.execute(
+                """
+                SELECT * FROM clarification_states
+                WHERE account_id = ? AND reader_id = ? AND status = 'awaiting_reply'
+                LIMIT 1
+                """,
+                (account_id or "default", reader_id),
+            ).fetchone()
+            if row is None:
+                return None
+            return ClarificationSnapshot(
+                clarify_id=int(row["clarify_id"]),
+                account_id=str(row["account_id"]),
+                reader_id=str(row["reader_id"]),
+                status=str(row["status"]),
+                original_batch_id=int(row["original_batch_id"]) if row["original_batch_id"] is not None else None,
+                original_question=str(row["original_question"]),
+                clarify_prompt=str(row["clarify_prompt"]),
+                attempt_count=int(row["attempt_count"]),
+                asked_at_epoch=float(row["asked_at_epoch"]),
+                asked_at_utc=str(row["asked_at_utc"]),
+                expires_at_epoch=float(row["expires_at_epoch"]),
+                consumed_at_utc=row["consumed_at_utc"],
+            )
+
+    def set_active_clarification(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        original_batch_id: int | None,
+        original_question: str,
+        clarify_prompt: str,
+        ttl_seconds: float = DEFAULT_CLARIFICATION_TTL_SECONDS,
+        now_epoch: float | None = None,
+    ) -> int:
+        """Persist a new single clarification state, expiring any prior pending row."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            acct = account_id or "default"
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE clarification_states
+                    SET status = 'expired'
+                    WHERE account_id = ? AND reader_id = ? AND status = 'awaiting_reply'
+                    """,
+                    (acct, reader_id),
+                )
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO clarification_states(
+                        account_id, reader_id, status, original_batch_id,
+                        original_question, clarify_prompt, attempt_count,
+                        asked_at_epoch, asked_at_utc, expires_at_epoch
+                    ) VALUES (?, ?, 'awaiting_reply', ?, ?, ?, 1, ?, ?, ?)
+                    """,
+                    (
+                        acct,
+                        reader_id,
+                        original_batch_id,
+                        original_question,
+                        clarify_prompt,
+                        now_val,
+                        now_utc,
+                        now_val + max(60.0, ttl_seconds),
+                    ),
+                )
+                return int(cursor.lastrowid)
+
+    def consume_active_clarification(
+        self, account_id: str, reader_id: str, *, now_epoch: float | None = None
+    ) -> None:
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE clarification_states
+                    SET status = 'consumed', consumed_at_utc = ?
+                    WHERE account_id = ? AND reader_id = ? AND status = 'awaiting_reply'
+                    """,
+                    (now_utc, account_id or "default", reader_id),
+                )
+
+    def record_triage_run(
+        self,
+        *,
+        batch_id: int,
+        account_id: str,
+        reader_id: str,
+        generation: int,
+        clarified_already: bool,
+        stage_path: str,
+        decision_route: str = "",
+        decision_preset_id: str = "",
+        decision_confidence: float | None = None,
+        decision_duration_ms: int | None = None,
+        preset_id: str = "",
+        source_url: str = "",
+        section_title: str = "",
+        reply_preview: str = "",
+        staff_case_id: int | None = None,
+        now_epoch: float | None = None,
+    ) -> int:
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO triage_runs(
+                        batch_id, account_id, reader_id, generation, clarified_already,
+                        stage_path, decision_route, decision_preset_id, decision_confidence,
+                        decision_duration_ms, preset_id, source_url, section_title,
+                        reply_preview, staff_case_id, created_at_epoch, created_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        batch_id,
+                        account_id or "default",
+                        reader_id,
+                        generation,
+                        1 if clarified_already else 0,
+                        stage_path,
+                        decision_route,
+                        decision_preset_id,
+                        decision_confidence,
+                        decision_duration_ms,
+                        preset_id,
+                        source_url,
+                        section_title,
+                        reply_preview[:160],
+                        staff_case_id,
+                        now_val,
+                        now_utc,
+                    ),
+                )
+                return int(cursor.lastrowid)
+
+    def list_triage_runs(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        bounded = max(1, min(limit, 200))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT run_id, batch_id, account_id, reader_id, generation, clarified_already,
+                       stage_path, decision_route, decision_preset_id, decision_confidence,
+                       decision_duration_ms, preset_id, source_url, section_title,
+                       reply_preview, staff_case_id, created_at_utc
+                FROM triage_runs
+                ORDER BY run_id DESC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def list_outbound_replies(self, *, limit: int = 20) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 200))
         with self._lock:
@@ -1507,6 +1756,15 @@ class SupportStore:
                 "SELECT status, COUNT(*) AS cnt FROM outbound_replies GROUP BY status"
             ).fetchall()
             reply_statuses = {str(r["status"]): int(r["cnt"]) for r in reply_rows}
+            triage_rows = self._conn.execute(
+                "SELECT stage_path, COUNT(*) AS cnt FROM triage_runs GROUP BY stage_path"
+            ).fetchall()
+            triage_stages = {str(r["stage_path"]): int(r["cnt"]) for r in triage_rows}
+            active_clarifications = int(
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM clarification_states WHERE status = 'awaiting_reply'"
+                ).fetchone()[0]
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "merge_enabled": self.merge_enabled,
@@ -1521,6 +1779,8 @@ class SupportStore:
                 "preempted_total": preempted_total,
                 "multi_message_batches": multi_message_batches,
                 "open_staff_cases": open_cases,
+                "active_clarifications": active_clarifications,
                 "feedback_count": feedback_total,
+                "triage_stages": triage_stages,
                 "outbound_replies": reply_statuses,
             }

@@ -9,6 +9,7 @@ import logging
 import os
 import threading
 import time
+import traceback
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -21,12 +22,22 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from support_backend import (
+    DEFAULT_DECISION_MODEL,
+    DEFAULT_DECISION_TIMEOUT_SECONDS,
+    DEFAULT_LONG_ANSWER_CHARS,
     DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
     DEFAULT_MERGE_ENABLED,
+    DEFAULT_MIN_SCORE,
+    DEFAULT_PRESET_MIN_CONFIDENCE,
     DEFAULT_QUIET_SECONDS,
+    DEFAULT_TOP_K,
+    PresetCatalog,
     SupportPipeline,
+    SupportResponder,
     SupportStore,
+    SystemOneClient,
+    Tier2KnowledgeResponder,
 )
 
 
@@ -69,6 +80,24 @@ _SUPPORT_IMMEDIATE_MAX_PREEMPTS = _env_int(
     "SUPPORT_IMMEDIATE_MAX_PREEMPTS", DEFAULT_MAX_PREEMPTS
 )
 _SUPPORT_AUTO_REPLY_ENABLED = _env_bool("SUPPORT_AUTO_REPLY_ENABLED", default=False)
+_SUPPORT_CORPUS_DIR_RAW = os.environ.get("SUPPORT_CORPUS_DIR", "rag-poc/corpus").strip()
+_SUPPORT_INDEX_DIR_RAW = os.environ.get("SUPPORT_INDEX_DIR", "rag-poc/index_v2").strip()
+_SUPPORT_DECISION_BASE_URL = os.environ.get("SUPPORT_DECISION_BASE_URL", "").strip()
+_SUPPORT_DECISION_API_KEY = os.environ.get("SUPPORT_DECISION_API_KEY", "").strip()
+_SUPPORT_DECISION_MODEL = (
+    os.environ.get("SUPPORT_DECISION_MODEL", DEFAULT_DECISION_MODEL).strip()
+    or DEFAULT_DECISION_MODEL
+)
+_SUPPORT_DECISION_TIMEOUT_SECONDS = _env_float(
+    "SUPPORT_DECISION_TIMEOUT_SECONDS", DEFAULT_DECISION_TIMEOUT_SECONDS
+)
+_SUPPORT_PRESET_MIN_CONFIDENCE = _env_float(
+    "SUPPORT_PRESET_MIN_CONFIDENCE", DEFAULT_PRESET_MIN_CONFIDENCE
+)
+_SUPPORT_LONG_ANSWER_CHARS = _env_int("SUPPORT_LONG_ANSWER_CHARS", DEFAULT_LONG_ANSWER_CHARS)
+_SUPPORT_TIER2_ENABLED = _env_bool("SUPPORT_TIER2_ENABLED", default=True)
+_SUPPORT_TIER2_TOP_K = _env_int("SUPPORT_TIER2_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K
+_SUPPORT_TIER2_MIN_SCORE = _env_float("SUPPORT_TIER2_MIN_SCORE", DEFAULT_MIN_SCORE)
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
 _DIRECT_ECHO_TEXT = os.environ.get("RELAY_DIRECT_ECHO_TEXT", "").strip()
@@ -424,19 +453,81 @@ async def _lifespan(application: FastAPI):
         merge_enabled=_SUPPORT_MERGE_ENABLED,
         max_preempts=_SUPPORT_IMMEDIATE_MAX_PREEMPTS,
     )
+    preset_catalog = PresetCatalog.from_corpus_dir(Path(_SUPPORT_CORPUS_DIR_RAW))
+
+    decision_client: SystemOneClient | None = None
+    if _SUPPORT_DECISION_BASE_URL and _SUPPORT_DECISION_API_KEY:
+        try:
+            decision_client = SystemOneClient(
+                base_url=_SUPPORT_DECISION_BASE_URL,
+                api_key=_SUPPORT_DECISION_API_KEY,
+                model=_SUPPORT_DECISION_MODEL,
+                timeout_seconds=_SUPPORT_DECISION_TIMEOUT_SECONDS,
+            )
+        except ValueError as exc:
+            _LOGGER.warning("Decision router config invalid: reason=%s", str(exc))
+
+    knowledge_responder: Tier2KnowledgeResponder | None = None
+    index_dir = Path(_SUPPORT_INDEX_DIR_RAW)
+    if _SUPPORT_TIER2_ENABLED and index_dir.is_dir() and any(index_dir.iterdir()):
+        try:
+            knowledge_responder = Tier2KnowledgeResponder(
+                index_dir=index_dir,
+                top_k=_SUPPORT_TIER2_TOP_K,
+                min_score=_SUPPORT_TIER2_MIN_SCORE,
+                long_threshold=_SUPPORT_LONG_ANSWER_CHARS,
+            )
+        except Exception as exc:
+            frames = traceback.extract_tb(exc.__traceback__)
+            loc = f"{Path(frames[-1].filename).name}:{frames[-1].lineno}" if frames else "-"
+            _LOGGER.warning(
+                "Tier 2 knowledge initialization skipped: reason=%s loc=%s",
+                getattr(exc, "code", type(exc).__name__),
+                loc,
+            )
+
+    def _clarify_with_tier2_llm(question: str, system_prompt: str) -> str:
+        if knowledge_responder is None:
+            return ""
+        from llama_index.core.base.llms.types import ChatMessage, MessageRole
+
+        resp = knowledge_responder._llm.chat(
+            [
+                ChatMessage(role=MessageRole.SYSTEM, content=system_prompt),
+                ChatMessage(role=MessageRole.USER, content=question),
+            ]
+        )
+        return str(getattr(resp.message, "content", None) or resp)
+
+    responder = SupportResponder(
+        store=support_store,
+        preset_catalog=preset_catalog,
+        decision_client=decision_client,
+        knowledge_responder=knowledge_responder,
+        clarify_generator=_clarify_with_tier2_llm if knowledge_responder is not None else None,
+        preset_min_confidence=_SUPPORT_PRESET_MIN_CONFIDENCE,
+    )
     pipeline = SupportPipeline(
         support_store,
         send_text_fn=_DIRECT_CLIENT.send_text,
         auto_reply_enabled=_SUPPORT_AUTO_REPLY_ENABLED,
+        triage_fn=responder.triage,
     )
+    pipeline.commit_handler = lambda outcome, plan: responder.apply_committed_plan(
+        outcome, plan, deliver_reply_fn=pipeline.deliver_reply
+    )
+    application.state.support_responder = responder
     application.state.support_pipeline = pipeline
     await pipeline.start()
     _LOGGER.info(
-        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d has_direct_creds=%s auto_reply=%s direct_echo=%s cloud_echo=%s",
+        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d presets=%d decision_ready=%s tier2_ready=%s has_direct_creds=%s auto_reply=%s direct_echo=%s cloud_echo=%s",
         _LOG_PATH,
         db_path,
         str(_SUPPORT_MERGE_ENABLED).lower(),
         _SUPPORT_IMMEDIATE_MAX_PREEMPTS,
+        len(preset_catalog.presets),
+        str(decision_client is not None).lower(),
+        str(knowledge_responder is not None).lower(),
         str(bool(_APP_ID and _APP_SECRET)).lower(),
         str(_SUPPORT_AUTO_REPLY_ENABLED).lower(),
         str(bool(_DIRECT_ECHO_TEXT)).lower(),
@@ -447,6 +538,7 @@ async def _lifespan(application: FastAPI):
     finally:
         await pipeline.stop()
         support_store.close()
+        application.state.support_responder = None
         application.state.support_pipeline = None
 
 
@@ -579,9 +671,13 @@ async def send_test_reply(request: Request) -> JSONResponse:
 async def support_overview(request: Request) -> JSONResponse:
     _verify_bearer_token(request)
     pipeline = _require_support_pipeline(request.app)
+    responder = getattr(request.app.state, "support_responder", None)
     return JSONResponse(
         {
             "auto_reply_enabled": pipeline.auto_reply_enabled,
+            "preset_count": len(responder.preset_catalog.presets) if responder is not None else 0,
+            "decision_router_ready": bool(responder is not None and responder.decision_client is not None),
+            "tier2_ready": bool(responder is not None and responder.knowledge_responder is not None),
             **pipeline.store.overview_metrics(),
         },
         headers=_HEADERS,
@@ -707,3 +803,35 @@ async def flush_due_support_batches(request: Request) -> JSONResponse:
         },
         headers=_HEADERS,
     )
+
+
+@app.get("/relay/support/triage-runs", response_class=JSONResponse)
+async def list_support_triage_runs(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=200),
+) -> JSONResponse:
+    _verify_bearer_token(request)
+    pipeline = _require_support_pipeline(request.app)
+    runs = pipeline.store.list_triage_runs(limit=limit)
+    return JSONResponse({"count": len(runs), "runs": runs}, headers=_HEADERS)
+
+
+@app.get("/relay/support/presets", response_class=JSONResponse)
+async def list_support_presets(request: Request) -> JSONResponse:
+    _verify_bearer_token(request)
+    _require_support_pipeline(request.app)
+    responder = getattr(request.app.state, "support_responder", None)
+    presets = (
+        [
+            {
+                "preset_id": item.preset_id,
+                "title": item.title,
+                "aliases": list(item.aliases),
+                "applicability": item.applicability,
+            }
+            for item in responder.preset_catalog.presets
+        ]
+        if responder is not None
+        else []
+    )
+    return JSONResponse({"count": len(presets), "presets": presets}, headers=_HEADERS)

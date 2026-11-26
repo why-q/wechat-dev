@@ -22,6 +22,7 @@ from support_backend import (
     SupportStore,
     classify_message,
 )
+from support_backend.db import SCHEMA_VERSION
 
 
 async def _async_asgi_request(
@@ -517,7 +518,7 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
             b = store.get_batch(1)
             self.assertIsNotNone(b)
             self.assertEqual((b.generation, b.preempt_count, b.preempt_locked), (1, 0, False))
-            self.assertEqual(store.overview_metrics()["schema_version"], 2)
+            self.assertEqual(store.overview_metrics()["schema_version"], SCHEMA_VERSION)
         finally:
             store.close()
 

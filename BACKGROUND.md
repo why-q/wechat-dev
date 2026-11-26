@@ -69,6 +69,13 @@
 - **2026-11-26 · 实测消息分布与立即抢占模式切换为默认**：项目负责人指出在现有 80 余名读者留言样本中仅 2 名发出多条连续消息（且均不超过 3 条）；强制对全部读者等待 3 秒会在多数单条提问上引入无谓延迟。据此已将系统与 `wechat-relay.service` 默认值切换为 `SUPPORT_MERGE_ENABLED=false`（立即启动 + 未提交前新消息追加并取消重跑），`SUPPORT_MERGE_ENABLED=true` 保留作可选 3s/10s 合并回退；配合 `SUPPORT_IMMEDIATE_MAX_PREEMPTS=2`（对应最多 3 条连续输入，超限锁批并入 `queued` 接力）与 `generation` 提交屏障防止双发与过期写入，并兼容迁移线上既有 SQLite 数据库（`SCHEMA_VERSION=2`）。
 - **2026-11-26 · Tier 1 决策模型选型（`decision-model-preview`）**：确认国内/可用中转已提供兼容 `/v1/systemone` 协议的 `decision-model-preview` 模型，原生支持 `choice`、`noul`、`score` 多题单次调用并返回各选项概率与置信度（仅按输入 token 计费；`base_url` 填站点根地址不带 `/v1`）。第 3 步 Tier 1 路由将直接对接 `POST {base_url}/v1/systemone` 一次同时判定下一步分流与 `1.` 固定答案匹配，保留 `2s` 超时降级到 Tier 2 `0.` 语料 RAG。
 
+### 2026-11-26 · 第三步：Tier 1 别名/决策路由、Tier 2 仅 `0.` 检索与澄清/Fallback 闭环
+
+- **Tier 1a 固定答案与归一化**：为 [1. 图书续借.md](rag-poc/corpus/1.%20图书续借.md)、[1. 图书预约.md](rag-poc/corpus/1.%20图书预约.md)、[1. 开馆时间.md](rag-poc/corpus/1.%20开馆时间.md) 补充 `id`、`title`、`aliases`、`applicability` frontmatter；[presets.py](support_backend/presets.py) 实现对称 `NFKC` + 空白折叠 + 去句末标点装饰符匹配与别名冲突校验（`1.` 正文严格保留作固定直返，不进入 Tier 2 向量库）。
+- **Tier 1b `/v1/systemone` 路由**：[decision_client.py](support_backend/decision_client.py) 对接 `decision-model-preview`（站点 URL 自动规范拼接 `/v1/systemone`、2s 超时），单次返回 `route` 与 `preset_id`（含 `confidence` 阈值门控）；超时、报错或未配置时按设计直接降级进 Tier 2。
+- **Tier 2 仅 `0.` 资料分块与核对引用**：[knowledge.py](support_backend/knowledge.py) 仅收录 `0.` 前缀公开文档，提取 `source` 后剥离 YAML，采用 `MarkdownNodeParser` 生成小节并将当前标题追加到 `header_path` 末尾，超长小节按 `SentenceSplitter(paragraph_separator="\n\n", chunk_size=512, chunk_overlap=80)` 细分；实际建成 `rag-poc/index_v2`（`5` 份 `0.` 文档、`66` 个块，含完整 `source` 与 `header_path` 元数据，`.gitignore` 已忽略生成索引文件）。
+- **长短分流、单次澄清上限与待办兜底**：[responder.py](support_backend/responder.py) 配合 `SCHEMA_VERSION=3`（新增 `clarification_states` 与 `triage_runs`）将逻辑严密拆分为「可抢占取消的 `triage`」和「提交屏障后的 `apply_committed_plan`」，长答按「简短结论 + `具体请参考 {URL} 下的「{section_title}」节。`」输出，每个问题最多反问 `1` 次，需要人工跟进时先写 `staff_todo` 再发信；systemd 服务已切至 `rag-poc/.venv`、设置 `HOME=/var/lib/private/wechat-relay` 与 `AF_UNIX` 并隔离 `DynamicUser` NLTK 缓存，线上重启实测 `tier2_ready=true`、`presets=3`。详见 [Step 3 文档](docs/STEP3-TIER1-AND-TIER2-RAG.md)。
+
 ## Reference
 
 - [消息与事件推送介绍](https://developers.weixin.qq.com/doc/subscription/guide/dev/push/)

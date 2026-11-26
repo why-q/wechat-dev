@@ -2,6 +2,8 @@
 
 from .db import (
     BatchSnapshot,
+    ClarificationSnapshot,
+    DEFAULT_CLARIFICATION_TTL_SECONDS,
     DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
     DEFAULT_MERGE_ENABLED,
@@ -11,6 +13,14 @@ from .db import (
     StaffCaseSnapshot,
     SupportStore,
 )
+from .decision_client import (
+    DEFAULT_DECISION_MODEL,
+    DEFAULT_DECISION_TIMEOUT_SECONDS,
+    DecisionAnswer,
+    DecisionClientError,
+    SystemOneClient,
+    build_systemone_url,
+)
 from .filters import (
     EMERGENCY_CONTACT_REPLY,
     FEEDBACK_RECEIVED_REPLY,
@@ -18,22 +28,67 @@ from .filters import (
     classify_message,
     default_same_case_matcher,
 )
+from .knowledge import (
+    DEFAULT_LONG_ANSWER_CHARS,
+    DEFAULT_MIN_SCORE,
+    DEFAULT_TOP_K,
+    KnowledgeError,
+    Tier2KnowledgeResponder,
+    Tier2Result,
+    build_chunks_from_corpus,
+    build_tier2_index,
+    format_grounded_answer,
+)
 from .pipeline import SupportPipeline
+from .presets import PresetCatalog, PresetDocument, normalize_alias_text, split_frontmatter
+from .responder import (
+    DEFAULT_CLARIFY_QUESTION,
+    DEFAULT_PRESET_MIN_CONFIDENCE,
+    FALLBACK_TEMPLATE_REPLY,
+    SupportResponder,
+    TriagePlan,
+)
 
 __all__ = [
     "BatchSnapshot",
+    "ClarificationSnapshot",
+    "DEFAULT_CLARIFICATION_TTL_SECONDS",
+    "DEFAULT_CLARIFY_QUESTION",
+    "DEFAULT_DECISION_MODEL",
+    "DEFAULT_DECISION_TIMEOUT_SECONDS",
+    "DEFAULT_LONG_ANSWER_CHARS",
     "DEFAULT_MAX_PREEMPTS",
     "DEFAULT_MAX_WAIT_SECONDS",
     "DEFAULT_MERGE_ENABLED",
+    "DEFAULT_MIN_SCORE",
+    "DEFAULT_PRESET_MIN_CONFIDENCE",
     "DEFAULT_QUIET_SECONDS",
+    "DEFAULT_TOP_K",
+    "DecisionAnswer",
+    "DecisionClientError",
     "EMERGENCY_CONTACT_REPLY",
+    "FALLBACK_TEMPLATE_REPLY",
     "FEEDBACK_RECEIVED_REPLY",
     "FilterDecision",
     "FlushOutcome",
     "IngestResult",
+    "KnowledgeError",
+    "PresetCatalog",
+    "PresetDocument",
     "StaffCaseSnapshot",
     "SupportPipeline",
+    "SupportResponder",
     "SupportStore",
+    "SystemOneClient",
+    "Tier2KnowledgeResponder",
+    "Tier2Result",
+    "TriagePlan",
+    "build_chunks_from_corpus",
+    "build_systemone_url",
+    "build_tier2_index",
     "classify_message",
     "default_same_case_matcher",
+    "format_grounded_answer",
+    "normalize_alias_text",
+    "split_frontmatter",
 ]
