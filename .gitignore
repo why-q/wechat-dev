@@ -31,7 +31,9 @@ htmlcov/
 
 # Local tools and generated artifacts
 .cache/
-data/
+data/*
+!data/Questions.md
+rag-poc/index/
 rag-poc/index_v2/
 *.log
 *.sqlite

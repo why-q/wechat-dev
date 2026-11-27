@@ -3,7 +3,6 @@ FROM python:3.11-slim-bookworm
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/rag-poc \
-    RAG_INDEX_DIR=/app/rag-poc/index \
     RAG_CORPUS_DIR=/app/rag-poc/corpus \
     RAG_NLTK_DATA_DIR=/tmp/wechat-dev-test/nltk_data \
     PORT=80
@@ -18,7 +17,6 @@ RUN python -m pip install --no-cache-dir --disable-pip-version-check uv==0.10.12
 COPY app.py /app/app.py
 COPY rag-poc/rag_poc /app/rag-poc/rag_poc
 COPY rag-poc/corpus /app/rag-poc/corpus
-COPY rag-poc/index /app/rag-poc/index
 
 EXPOSE 80
 

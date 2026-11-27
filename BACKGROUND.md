@@ -2,9 +2,9 @@
 
 ## 1. 工作背景与业务目标
 
-本人在汕头大学图书馆负责数字化建设相关工作，具体职责目前就是负责 AI 应用方面的开发。
+本人在汕头大学图书馆负责数字化建设相关工作，具体职责目前就是负责 AI 应用方面的开发。本项目为微信服务号智能客服。
 
-本项目起因是图书馆读者投诉较多，据观察大部分与未充分了解图书馆规章有关（暂无投诉分类和数量统计可用于量化）。目前已落地两段式自动客服主体（第 1–3 步：微信云托管极简转发 + 自建服务器 Filter / SQLite / 即时抢占与合批 / Tier 1 别名与 `/v1/systemone` 决策 / Tier 2 仅 `0.` 语料 RAG 引用 / `Feedback` 与 `Emergency` / `Fallback` 馆员待办创建、追加与 API 结案），正在测试白名单范围内真机运行；第 4 步人机协同 Dashboard 界面与离线评测导出待接续完善。
+本项目起因是图书馆读者咨询与投诉较多，部分源于未充分了解图书馆规章。前期已梳理近一个月公众号脱敏私信样本 [data/Questions.md](data/Questions.md)（共 86 条，覆盖规则咨询、续借/预约/空间等业务求助、系统故障、现场投诉及紧急情况等），线上运行阶段也已在自建服务器 SQLite 中按 `Filter` 分类与待办状态留存可量化记录（第 4 步补齐 Dashboard 汇总展示与评测导出）。目前已落地两段式自动客服主体（第 1~3 步：微信云托管极简转发 + 自建服务器 Filter / SQLite / 即时抢占与合批 / Tier 1 别名与 `/v1/systemone` 决策 / Tier 2 仅 `0.` 语料 RAG 引用 / `Feedback` 与 `Emergency` / `Fallback` 馆员待办创建、追加与 API 结案），正在测试白名单范围内真机运行；第 4 步人机协同 Dashboard 界面与离线评测导出待接续完善。
 
 | 渠道 | 已知情况 | 本次范围 |
 |---|---|---|
@@ -16,9 +16,9 @@
 
 ## 2. 数据范围
 
-答案以图书馆公开文档为依据，包括图书馆主页和公众号文章等。早期 PoC 基线使用 4 份资料（对应 `rag-poc/index/`）；当前生产语料按前缀三分法管理共 11 份 Markdown 文档（`rag-poc/corpus/`）：
+答案以图书馆公开文档为依据，包括图书馆主页和公众号文章等。早期 PoC 基线使用 4 份资料（对应已移除的旧 `rag-poc/index/`）；当前生产语料按前缀三分法管理共 11 份 Markdown 文档（`rag-poc/corpus/`）：
 - `1.*.md`（3 份：`图书续借`、`图书预约`、`开馆时间`）：仅作 Tier 1 固定答案与 YAML 别名精确匹配，不入向量库。
-- `0.*.md`（5 份：`咨询台`、`常见问题`、`服务项目`、`联系我们`、`规章制度`）：唯一进入 Tier 2 向量库（`rag-poc/index_v2/`，66 个带 `source` 与完整 `header_path` 的块）。
+- `0.*.md`（5 份：`咨询台`、`常见问题`、`服务项目`、`联系我们`、`规章制度`）：唯一进入 Tier 2 向量库（`rag-poc/index_v2/`，67 个带 `source` 与完整 `header_path` 的块）。
 - `9.*.md`（3 份：`学科馆员`、`本馆简介`、`机构设置`）：背景资料，不纳入自动客服检索。
 
 服务范围限通用问题和公开自助指引，个人业务情况由馆员核实处理（目前 `0.` 语料对部分新业务如“静音舱/座位预约”尚有覆盖缺口，已由真实测试触发兜底并待第 4 步前补全）。
@@ -40,11 +40,13 @@
 
 ## 5. 历史记录
 
-2026-11-25: 试图使用微信的 `getMsgList` 接口来获取用户的询问，无果。因为这个接口只会提取到已经被回复的消息。如果没有回复用户（通过后台或者其他任何方式），则消息不会被捕获。
+### 2026-11-25 · `getMsgList` 接口测试及提案
+
+试图使用微信的 `getMsgList` 接口来获取用户的询问，无果。因为这个接口只会提取到已经被回复的消息。如果没有回复用户（通过后台或者其他任何方式），则消息不会被捕获。
 
 初步测试方案：公开、现行的图书馆资料作为检索语料。先手工标注问题，冻结离线评估集，再通过微信云托管 `/wechat` 回调前向采集待审核问题。读者原文在受限环境短期保存，获准的脱敏改写经人工标注后进入评估集。建议使用 Baserow 审核，或先用本地表格起步，评估使用带版本的导出文件。[RAG 数据集与测试方案](docs/RAG-DATASET-TEST-PLAN.md)
 
-客服设计提案：先按读者诉求选择已审核标准答案、一次澄清、人工入口或紧急指引。RAG 用新版语料进行离线对照，达到质量与覆盖门槛后按主题试点。通过运营看板跟踪答复、人工处理与知识缺口，馆员审核后将失败样本和修订内容纳入回归测试。提案含样本分析和首批待审答案。 [图书馆智能客服设计](docs/LIBRARY-SUPPORT-DESIGN.md)
+客服设计提案：先按读者诉求选择已审核标准答案、一次澄清、人工入口或紧急指引。RAG 用新版语料进行离线对照，达到质量与覆盖门槛后按主题试点。通过运营看板跟踪答复、人工处理与知识缺口，馆员审核后将失败样本和修订内容纳入回归测试。提案含样本分析和首批待审答案。 [图书馆智能客服设计](docs/DESIGN.md)
 
 ### 2026-11-26 · 客服流程讨论
 
@@ -60,10 +62,10 @@
 ### 2026-11-26 · 云托管转发测试管道
 
 - 第一步实现云托管到自有服务器的转发测试管道：`app.py` 新增 `WECHAT_FORWARD_URL`、`WECHAT_FORWARD_TOKEN`、`WECHAT_FORWARD_TIMEOUT_SECONDS`（默认 3.0s，上限 4.5s）和 `WECHAT_FORWARD_FAIL_OPEN`（默认 true），在 `CheckContainerPath` 之外的所有 `/wechat` 回调中同步转发（先于 `WECHAT_AUTO_REPLY_ENABLED` 提前返回，避免试测阶段依赖 RAG/LLM 凭据或触发错误自动回复）。
-- 自有服务器侧新增独立接收端 `relay_receiver.py`，强制要求 `RELAY_AUTH_TOKEN` Bearer 鉴权，提供 `/healthz`、`/relay/wechat` 与 `/relay/events`，并将收到的消息及 `x-wx-*` 头以 `0600` 权限持久化到 JSONL（默认 `data/relay-events.jsonl`，已加入 `.gitignore`）。具体操作见 [云托管转发测试管道](docs/CLOUD-FORWARD-TEST-PIPELINE.md)。
+- 自有服务器侧新增独立接收端 `relay_receiver.py`，强制要求 `RELAY_AUTH_TOKEN` Bearer 鉴权，提供 `/healthz`、`/relay/wechat` 与 `/relay/events`，并将收到的消息及 `x-wx-*` 头以 `0600` 权限持久化到 JSONL（默认 `data/relay-events.jsonl`，已加入 `.gitignore`）。具体操作见 [Step 1 云托管转发管道](docs/STEP1-CLOUD-FORWARD-PIPELINE.md)。
 - 首次实测确认云托管公网转发成功：事件与文本消息均以 JSON 送达，携带 `x-wx-appid`、`x-wx-env`、`x-wx-openid`、`x-wx-region`、`x-wx-service`、`x-wx-source`（实测值为 `other`），且 `event` 类型无 `MsgId`。
 - 下一步在 `app.py` 增加可选云头校验（`WECHAT_CLOUD_EXPECTED_SOURCE` / `ENV` / `APPID`）与 `errmsg` 安全日志，在 `relay_receiver.py` 新增直连 `custom/send` 测试接口 `/relay/send-test` 及受控云调用回发测试钩子，并配套 `wechat-relay.service` 与 Nginx HTTPS（`wechat-dev.llink.cyou`）配置以完成出站手机送达验收。
-- **2026-11-26 双向闭环实测通过**：已确认「手机私信 -> 微信云托管 -> HTTPS 自有服务器（`wechat-relay.service`）-> 自有服务器直连 `custom/send` -> 手机真实收到回复」全链路跑通；后续消息处理与回发可全部驻留自有服务器。同时观测到公众号日常会产生大量 `msg_type="event"`（如自定义菜单 `Event="VIEW"`，无 `Content` 和 `MsgId`），需在下一步的 `Filter` 中按 [图书馆智能客服设计](docs/LIBRARY-SUPPORT-DESIGN.md) 过滤。
+- **2026-11-26 双向闭环实测通过**：已确认「手机私信 -> 微信云托管 -> HTTPS 自有服务器（`wechat-relay.service`）-> 自有服务器直连 `custom/send` -> 手机真实收到回复」全链路跑通；后续消息处理与回发可全部驻留自有服务器。同时观测到公众号日常会产生大量 `msg_type="event"`（如自定义菜单 `Event="VIEW"`，无 `Content` 和 `MsgId`），需在下一步的 `Filter` 中按 [图书馆智能客服设计](docs/DESIGN.md) 过滤。
 
 ### 2026-11-26 · 第二步：Filter、SQLite 与消息合并管道
 

@@ -1,71 +1,57 @@
-# RAG dataset and testing plan
+# RAG 数据集与评测方案
 
 > [!NOTE]
-> **Implementation status (2026-11-27):** Phase 2 prospective SQLite intake (`inbound_events` with 7-day `expires_at_epoch`, `staff_cases`, `feedback_records`, and Step 3 `triage_runs`) is live in [support_backend/schema.py](../support_backend/schema.py) and [relay_receiver.py](../relay_receiver.py). Evaluation-set export & Step 4 Dashboard review remain scheduled next after doc/code cleanup.
+> 第 1~3 步已落地 SQLite 留痕（`inbound_events` 7 天过期、`triage_runs`、`staff_cases`、`feedback_records`），见 [Step 2](STEP2-FILTER-AND-MERGE-PIPELINE.md) 与 [Step 3](STEP3-TIER1-AND-TIER2-RAG.md)。本文聚焦第 4 步的**脱敏评测集建设、离线评测口径与首轮验收门槛**，总体分流逻辑见 [系统设计](DESIGN.md)。
 
-The four-document RAG baseline is kept for reproducibility. The broader customer support pilot reuses this document's corpus manifest, evaluation split, redaction, and intake contracts. It adds `emergency` to `expected_action` and ordered `turns` for multi-message cases. Its release gates and channel modes are defined in the [customer support design](LIBRARY-SUPPORT-DESIGN.md). The thresholds below retain their original scope as diagnostic gates for the initial RAG baseline.
+## 工具选型
 
-## Recommendation
+初期直接用**本地 UTF-8 CSV + 表格软件**起步，审核定稿后导出版本化 JSONL 供离线评测复现。多人并行审核再考虑接入外部工具：
 
-Start with a hand-labeled set and the existing LlamaIndex PoC. Use Baserow as the browser editor if library staff want a shared review queue. A UTF-8 CSV edited in a local spreadsheet is enough for the first round and uses the same columns. Export reviewed cases to versioned JSONL so a run can be repeated against the same questions and document versions. The listener adds candidate questions after the baseline exists. The library's public documents remain the source of answer evidence.
-
-| Tool | Good fit for this project | When to choose it |
+| 工具 | 适用场景 | 选型边界 |
 |---|---|---|
-| Baserow | Staff can enter and edit rows in a spreadsheet-style grid, filter a review queue, and export the approved view. Self-hosting and a scoped REST API are available. | Use the signed-in grid when several staff need to review and maintain cases. [Grid](https://baserow.io/user-docs/guide-to-grid-view) · [Filtered export](https://baserow.io/user-docs/export-a-view) · [Hosting](https://baserow.io/user-docs/set-up-baserow) · [API](https://baserow.io/user-docs/database-api) |
-| Langfuse | Manual dataset entry, CSV upload, structured expected output, and experiments against the existing RAG. | Choose it if comparing runs and inspecting traces is the main pain point. Import only synthetic or approved de-identified examples. [Datasets](https://langfuse.com/docs/evaluation/experiments/datasets) |
-| Dify | Document and chunk management, metadata, and a built-in retrieval test. | Choose it only if staff need to own the knowledge base and its retrieval pipeline in a browser. Current LlamaIndex settings and scores would need a new baseline. [Documents](https://docs.dify.ai/en/cloud/use-dify/knowledge/manage-knowledge/maintain-knowledge-documents) · [Metadata](https://docs.dify.ai/en/cloud/use-dify/knowledge/metadata) · [Retrieval Test](https://docs.dify.ai/en/cloud/use-dify/knowledge-base/test-and-tune) |
+| Baserow | 多位馆员在线表格协同审核、筛选队列与导出视图 | 仅在需要多人在线审核时部署（自建或托管）。现网宿主机曾测得约 4 vCPU / 7.75 GiB 内存（可用约 1.27 GiB、无 Swap），同机部署前须先压测。 |
+| Langfuse | 管理评测集、追踪单次生成链路与对比实验 | 仅用于比较调优实验，禁止导入未经脱敏的真实读者原文或 OpenID。 |
+| Dify | 浏览器端托管知识库与检索切片 | 当前链路已基于 LlamaIndex `index_v2` 运行，迁入需重建全部检索基线，暂不采用。 |
 
-Use a local spreadsheet for Phase 1. Add Baserow if staff need shared browser editing, on a separately provisioned host or an approved hosted workspace. The last recorded service-host snapshot had 4 vCPUs, about 7.75 GiB RAM, about 1.27 GiB available, and no swap. It is one observation, so check available memory under representative load before placing any editor or evaluation platform on that host. [Host snapshot](RAG-PROGRESS.md#评估范围与机器快照)
+## 数据集结构
 
-## Dataset structure
-
-| Collection | Record unit and fields | Use |
+| 集合 | 核心字段 | 用途与脱敏边界 |
 |---|---|---|
-| `corpus` | One revision of an official source per record. `doc_id`, `revision`, `title`, `source_url`, `relative_path`, `effective_from`, `effective_to`, `status`, `checked_on`. Keep the Markdown, TXT, or text-readable PDF alongside the manifest. | Start with the four existing documents after checking that each is current. Index approved revisions only. Keep archived and future revisions outside the input folder. If two current sources disagree and their scopes do not resolve the conflict, have a librarian settle it or label the case for staff. |
-| `eval_cases` | One reviewed question per row. `case_id`, `question`, `topic`, `origin` (`synthetic` or `wechat_redacted`), `intent_group`, `split` (`dev` or `holdout`), `expected_action`, `required_facts`, `evidence_refs`, `review_status`. | Score paraphrases by the facts they convey and the evidence they cite. Every `answer` needs required facts and evidence. `clarify` needs the missing detail, `abstain` needs the reason evidence is insufficient, and `staff` needs the reason staff action is required. Put these in `required_facts` as review criteria. |
-| `inbox` | One inbound text delivery per row. `event_key`, `received_at_utc`, `text`, `review_status`, `expires_at`. | Restricted SQLite on the user's server. A reviewer selects a recurring need or a failure worth testing, rewrites it without identifying details, and copies the cleaned question to `eval_cases` as a draft. Raw text, message keys, OpenIDs, and exact timestamps stay out of evaluation exports, Git, logs, and model calls on this path. |
+| `corpus` | `doc_id`、`revision`、`title`、`source_url`、`relative_path`、`effective_from`、`effective_to`、`status`、`checked_on` | 记录已核对生效的公开资料版本（`0.*` 入 Tier 2 向量库、`1.*` 作 Tier 1 预设答案）；未发布或过期版本不进索引。 |
+| `eval_cases` | `case_id`、`question`、`topic`、`origin`（`synthetic` / `wechat_redacted`）、`intent_group`、`split`（`dev` / `holdout`）、`expected_action`、`required_facts`、`evidence_refs`、`review_status` | 评测主表。`expected_action` 取值：`answer` / `clarify` / `abstain` / `staff` / `emergency`（多条连续消息保留有序 `turns`）。 |
+| `inbound_events`（SQLite） | `seq`、`received_at_epoch`、`filter_category`、`content`、`expires_at_epoch`（默认 7 天） | 仅作自建服务器内受限入站池。OpenID、原始消息键、精确时间戳及未脱敏正文不得进入评测导出、Git、日志或外呼对比。 |
 
-Evidence references use `doc_id` + `revision` + a section heading or PDF page. The gold set uses these references instead of generated chunk IDs, which can change when splitting changes. If a question needs multiple facts from different sections, mark every required reference. A single topic can have several `intent_group` values. Keep paraphrases of the same intent and policy scenario in one split to prevent leakage.
+约束规则：
 
-A synthetic `answer` example is `借来的书最多能续借几次？`. The reviewer fills in the number and any preconditions from the current renewal section and links that exact revision. `请帮我撤销这笔罚款` is `staff` even when a fines policy exists. `今天开到几点？` is `clarify` if the applicable location is genuinely unclear from the question. `今天的馆际互借申请处理到哪一步了？` is `staff` because the answer depends on a personal record. An unrelated question or one that lacks a public answer and needs no staff action is `abstain`.
+- **依据绑定版本与小节**：`evidence_refs` 使用 `doc_id + revision + 小节标题`，不绑定易随切分变化的 chunk ID；跨小节作答需列出全部必备出处。
+- **防止评测泄漏**：同一 `intent_group` 的不同问法必须同处 `dev` 或同处 `holdout`；`dev` 用于调参，冻结的 `holdout` 仅用于最终对照验收。
+- **动作标注口径**：有公开规则可答标 `answer`；合理位置/场景缺关键前提标 `clarify`；需核查个人记录、减免罚款或投诉处置即使有规则也标 `staff`；超范围或缺公开依据标 `abstain`；物理被困或突发安全标 `emergency`。
 
-## Phase 1 · Manual baseline
+## 离线评测流程与首轮门槛
 
-1. Verify the active source documents against the library site or official account before indexing. Add a temporary index smoke check for each source so critical numbers, conditions, and section boundaries survive extraction. Use the existing `index --corpus … --index-dir …` and `query --index-dir … --top-k 4 --min-score 0.2` commands from `rag-poc/` with synthetic inputs and a scratch index directory. Keep the deployed index intact.
-2. Hand-label 40 cases as a starting target. Use roughly 24 `answer`, 6 `clarify`, 5 `abstain`, and 5 `staff` cases. Include ordinary Chinese phrasing, typos, paraphrases, policy exceptions, multi-section answers, complaints, and near-topic questions the corpus cannot answer. Include both obvious out-of-scope and plausible but unsupported questions. Split 20/20 by `intent_group` with each action represented in both sets. Freeze the first holdout export before tuning. Grow it with fresh groups if holdout findings influence tuning.
-3. Use the signed-in Baserow grid or a local spreadsheet to add cases. Keep Draft and Approved views. Use one row per case, with arrays of facts and references entered one per line. Export Approved to CSV and normalize arrays and stable IDs to JSONL. Validate duplicate IDs, evidence against the corpus manifest, enum fields, required review criteria, and split overlap before accepting an export. Commit approved synthetic cases and public source metadata with the snapshot. Include de-identified reader-derived cases only if the approved release scope permits it. Keep draft work and all raw data outside Git.
-4. For each case, record raw top-K matches and scores, matches after filtering, the actual action and citations, whether generation ran, and latency. Save the corpus and eval snapshot identifiers, embedding and chat model IDs, prompt/code revision, chunk settings, and score cutoff with each run. Add a small Python evaluator against the existing retrieval and responder code. Report retrieval and generation results per case with an explicit error outcome for provider failures. A librarian scores each required fact and citation against the selected source, then records action and pass/fail. Report embedding, retrieval, and generation timings separately where available, with p50 and p95 as descriptive figures. Compare variants on `dev`, change one setting at a time, and run the chosen configuration against the frozen holdout.
+1. **校验语料**：核对公开网页与公众号原稿后，运行 `python -m support_backend inspect-chunks` 与 `build-index` 更新 `rag-poc/index_v2/`（若需离线对照，可用 `rag_poc.cli index` 临时建库）。
+2. **构建首批题库**：建议起步人工标注 40 题（约 24 `answer`、6 `clarify`、5 `abstain`、5 `staff`），覆盖日常口语、错别字、规则例外、跨节答案、投诉及超范围问题，按 `intent_group` 对半拆入 `dev` / `holdout`。
+3. **审核导出**：经本地表格或 Baserow 区分 `Draft` / `Approved` 视图，导出 JSONL 前校验 `case_id` 唯一、枚举合法、出处有效且 `dev`/`holdout` 无交叉，仅将合成题与已核准脱敏改写纳入版本库。
+4. **运行评测**：记录原始 top-K 得分、实际触发路由、`source_url` 与小节引用、生成耗时（p50/p95）及接口失败；单次只调整一个变量并在 `dev` 验证后，再跑冻结 `holdout`。
 
-| Check | Proposed first-round gate |
+| 检查项 | 首轮验收门槛 |
 |---|---|
-| Retrieval | At least 11 of 12 answerable holdout cases contain all required evidence in the four retrieved chunks. Also report the count after the cutoff and score distributions for unsupported questions. If the group split yields a different total, use at least 90% and report the numerator and denominator. |
-| Answers and citations | At least 10 of 12 answerable cases state all required facts with supporting citations, or at least 80% for a different denominator. Any materially wrong policy claim or citation to a superseded source fails the round. |
-| Action | Every holdout `clarify`, `abstain`, and `staff` case takes the expected action. Report fixed no-evidence abstentions separately from model-generated refusals. A staff outcome can tell the reader to contact staff and must not claim a transfer or resolution that did not occur. |
-| Failure handling | Provider errors show up as errors in the report. Report each bad case with its failed stage and rerun the affected cases after the underlying issue is fixed. |
+| 检索召回 | 可答 `holdout` 题至少 `90%`（如 `11/12`）在 `top_k=4` 内包含全部必备依据。 |
+| 答案与引用 | 可答 `holdout` 题至少 `80%`（如 `10/12`）答全 `required_facts` 且出处真实有效；出现关键政策错误或引用过期源即不通过。 |
+| 动作路由 | `holdout` 中全部 `clarify`、`abstain`、`staff`、`emergency` 走对预期分支；`staff` 只能提示已登记/联系馆员，不得伪称已转接解决。 |
+| 异常记录 | 接口超时或异常必须独立记错并支持重跑，不与正常拒答混算。 |
 
-These thresholds are proposed pilot targets. Establish the baseline with the existing CLI's `top-k=4` and `min-score=0.2`. The earlier unrelated probe passed `0.2` and was refused by the model, so both stages need independent measurement. Score whether the response directs the reader to staff when expected. Actual transfer requires a staff handoff integration.
+## 线上样本回流闭环（第 4 步）
 
-The first holdout measures the four-document pilot only. Before expanding coverage, inventory the missing public library pages and official account articles, confirm which sources are current, and ingest them as a new corpus revision. Review expected actions, facts, and citations against that revision. Some previously unsupported questions may now have answers. Keep the first snapshot for reproducibility, add holdout cases for the new topics, and rerun retrieval, citation, and action gates on the expanded snapshot before relying on those scores.
-
-## Phase 2 · Prospective WeChat intake
-
-The account administrator confirmed `getMsgList` omits unanswered private messages for this account. With auto-reply disabled, the callback acknowledges text and exits before storage. Add collection before that early return. Use the current cloud-internal callback as the source and a restricted authenticated receiver on the user's server as the destination. [Callback code](../app.py#L602) · [Cloud Hosting push setup](https://developers.weixin.qq.com/miniprogram/dev/wxcloudservice/wxcloudrun/src/guide/weixin/push.html)
-
-The SQLite `inbox` supersedes the historical collector as the active raw-question review source. Staff review the protected export from that inbox. Keep the existing `questions.csv` and `sync-state.json` as restricted legacy artifacts under the applicable retention policy. The historical key comes from record fields, while callback deduplication uses the account and `MsgId`. Leave the history timer disabled and keep the legacy rows out of the live inbox. [Historical collector](../README.md#微信历史问题采集一次性-cli)
+历史 `getMsgList` 采集脚本与定时任务已废弃移除（若本地留有旧 `questions.csv` 与 `sync-state.json`，按留存策略封存，不并入线上数据库）。当前样本回流直接基于 [Step 1](STEP1-CLOUD-FORWARD-PIPELINE.md) 与 [Step 2](STEP2-FILTER-AND-MERGE-PIPELINE.md) 的实时留痕库推进：
 
 ```mermaid
 flowchart LR
-    W[WeChat text push] --> C[Cloud Hosting /wechat]
-    C --> S[Authenticated receiver and SQLite]
-    S --> R[Authorized reviewer]
-    R --> E[Approved evaluation snapshot]
-    E --> T[Offline RAG evaluation]
-    P[Current public sources] --> T
+    DB[("SQLite inbound_events<br/>与 triage_runs")] -->|受限导出高频/兜底样本| REV[人工脱敏改写与标注]
+    REV -->|校验后冻结| EVAL[("评测集 eval_cases JSONL")]
+    EVAL --> RUN[离线回归评测]
+    CORP["0.* / 1.* 公开语料"] -->|同步补全与重建索引| RUN
 ```
 
-- Keep public access to the cloud callback disabled. Cloud Hosting forwards text plus a keyed event identifier derived from the configured account and `MsgId`. Both the inbound ID and event key stay strings. The receiver enforces a unique event key and confirms a new or previously committed row. Skip non-text messages. Count missing IDs separately and skip those messages in the pilot so duplicate handling stays deterministic. Only the account-scoped event key travels with the text. Keep the receiver behind a private connection where available or use TLS and a dedicated token with write-only application access. Keep the token and event-key secret in server and cloud secret configuration as appropriate.
-- Use a bounded synchronous write through the receiver. Return `success` after durable commit, including when an earlier attempt already committed the same event. Return a retryable error if the receiver fails or times out. Cloud behavior on non-2xx and outages is unverified. Run an authorized receiver-outage test including recovery. If redelivery does not recover the same event, persist a cloud-side outbox and drain it before treating capture as reliable. Restart and deployment must preserve accepted records. Keep auto-reply disabled throughout intake verification.
-- Use a protected export from the receiver for the local reviewer to triage periodically. Delete dropped raw items promptly. Set a proposed maximum of seven days for unreviewed raw text, with expiry applied also to exports and backups, subject to the library's retention policy. Have staff confirm the processing and access scope for listening before capturing reader traffic. Staff move only reviewed rewrites into the editor. Labels, evidence checks, and export follow the same Phase 1 workflow. Verify that logs and metrics contain only operational fields. Count accepted rows, duplicates, unsupported messages, failed forwards, and age of the review backlog. If intake outruns labeling, sample repeated intents before export.
-- Test with a single authorized synthetic message and no reply. Verify one row reaches the server without OpenID and the phone receives no automatic reply. Replay the same event, exercise non-text and missing-ID deliveries, force a receiver timeout, and restart the receiver after a commit. Verify that a duplicate never creates a second row and that a failed forward remains visible in metrics. Promote one cleaned example from the SQLite inbox, export it, and verify the offline evaluator can read it. Confirm the historical timer is still disabled before cutover. Pause forwarding if the intake path fails acceptance. Previously approved snapshots and the offline workflow remain usable.
-
-The critical assumption for Phase 2 is that WeChat Cloud Hosting can reach the chosen server over authenticated HTTPS within the callback budget. Reachability, retry behavior, and receiver persistence need the scenario above. The implementation uses the existing Python runtime and provider settings, one private receiver process on the user's server, existing cloud/official-account access, a receiver token, and an event-key secret. A Baserow deployment and its editor accounts are optional. Phase 1 can run with the existing embedding and chat credentials and a local spreadsheet. Current planning did not exercise provider calls or live collection.
+- 优先从 `triage_runs` 与 `staff_cases` 抽取 `tier2_fallback`、`clarify_limit_fallback` 及高频提问，人工去除个人敏感信息并改写为可公开评测的问法后加入 `eval_cases`。
+- 原始入站消息正文按 7 天到期策略清理（导出副本与临时备份同步受限与到期删除）；同步根据缺口补充 `0.`/`1.` 语料并重跑回归评测。

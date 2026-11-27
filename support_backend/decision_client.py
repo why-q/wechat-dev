@@ -1,4 +1,4 @@
-"""HTTP JSON client for `/v1/systemone` decision models (decision-model-preview / Jev)."""
+"""HTTP JSON client for `/v1/systemone` decision models (`decision-model-preview`)."""
 
 from __future__ import annotations
 
