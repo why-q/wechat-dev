@@ -3,7 +3,7 @@
 本项目为汕头大学图书馆微信公众号/服务号 AI 自动客服与工单转接系统，采用**「微信云托管极简转发 + 自建服务器全栈处理」**两段式架构：
 
 - **微信云托管入口（[app.py](app.py) / [Dockerfile](Dockerfile)）**：只负责接收微信云托管消息推送（`/wechat`，含 `CheckContainerPath` 探测），以最小 `2` 项环境变量配置同步转发到自建服务器，不运行大模型检索也不存储读者数据。
-- **自建服务器后端（[relay_receiver.py](relay_receiver.py) + [support_backend/](support_backend/)）**：运行于 `wechat-relay.service`（Nginx HTTPS 域名 `wechat-dev.llink.cyou`），完成来源头校验、Filter 预分类、SQLite WAL 持久化（`SCHEMA_VERSION=4`）、即时抢占 / 可选防抖合并、Tier 1 精确别名与 `/v1/systemone` 决策路由、Tier 2 仅 `0.` 公开语料 RAG 引用生成、单次澄清上限、紧急热线/`Fallback` 馆员待办兜底，以及直连微信客服消息 API（`custom/send`）回复。
+- **自建服务器后端（[relay_receiver.py](relay_receiver.py) + [support_backend/](support_backend/)）**：运行于 `wechat-relay.service`（Nginx HTTPS 域名 `wechat-dev.997881.xyz`），完成来源头校验、Filter 预分类、SQLite WAL 持久化（`SCHEMA_VERSION=4`）、即时抢占 / 可选防抖合并、Tier 1 精确别名与 `/v1/systemone` 决策路由、Tier 2 仅 `0.` 公开语料 RAG 引用生成、单次澄清上限、紧急热线/`Fallback` 馆员待办兜底，以及直连微信客服消息 API（`custom/send`）回复。
 
 > [!NOTE]
 > 早期直接在云托管内运行 `RagResponder` 的方案及旧单机服务（`wechat-dev-test.service`）仅保留作应急回滚；离线 PoC CLI 说明见 [rag-poc/README.md](rag-poc/README.md)。
@@ -15,7 +15,7 @@
 ```mermaid
 flowchart LR
     U(["读者公众号私信"]) --> WX["微信云托管 /wechat · app.py"]
-    WX -->|"HTTPS POST + Bearer Token"| NG["Nginx · wechat-dev.llink.cyou"]
+    WX -->|"HTTPS POST + Bearer Token"| NG["Nginx · wechat-dev.997881.xyz"]
     NG -->|"127.0.0.1:8090"| RL["relay_receiver.py"]
     RL --> HDR["来源头校验 x-wx-* & JSONL 审计"]
     HDR --> FLT["前置过滤 · 5 类分流"]
@@ -63,7 +63,7 @@ flowchart LR
 在微信云托管绑定 GitHub 仓库（分支 `main`、端口 `80`、路径 `/wechat`、消息格式 JSON）后，控制台只需配置：
 
 ```ini
-WECHAT_FORWARD_URL=https://wechat-dev.llink.cyou/relay/wechat
+WECHAT_FORWARD_URL=https://wechat-dev.997881.xyz/relay/wechat
 WECHAT_FORWARD_TOKEN=<与服务器 RELAY_AUTH_TOKEN 一致>
 ```
 
@@ -83,7 +83,7 @@ WECHAT_FORWARD_TOKEN=<与服务器 RELAY_AUTH_TOKEN 一致>
 
 ### 3. Dashboard 部署与权限
 
-设置管理员与普通馆员各自独立的 Basic Authentication 密码，并将公开 origin 固定为 `https://wechat-dev.llink.cyou`。配置值示例见环境模板；取消注释并替换密码后才会启用对应角色，未配置的角色返回 `404`。用户名固定为 `admin` 或 `librarian`。管理员可访问两个工作视图及白名单修改；普通馆员只能访问 `/dashboard/librarian`。Dashboard 不使用或暴露 `RELAY_AUTH_TOKEN`。
+设置管理员与普通馆员各自独立的 Basic Authentication 密码，并将公开 origin 固定为 `https://wechat-dev.997881.xyz`。配置值示例见环境模板；取消注释并替换密码后才会启用对应角色，未配置的角色返回 `404`。用户名固定为 `admin` 或 `librarian`。管理员可访问两个工作视图及白名单修改；普通馆员只能访问 `/dashboard/librarian`。Dashboard 不使用或暴露 `RELAY_AUTH_TOKEN`。
 
 Nginx 只将 `/dashboard/` 的 HTTP 请求重定向到 HTTPS；`/wechat`、`/healthz` 与现有 `/relay/*` 的 HTTP 行为保持不变，并反代 Dashboard 路径。应用还会校验 HTTPS scheme、精确 Host 与管理员表单的同源 `Origin`。Dashboard 响应设置 `no-store`、`strict-origin`（仅发送 origin，不发送路径），代理访问日志关闭。systemd 将共享样式只读挂载到 `support_backend/dashboard.css`，无需复制 demo CSS。请勿绕过 HTTPS 直接开放 `8090`。
 
@@ -101,7 +101,7 @@ rag-poc/.venv/bin/python -m support_backend build-index \
 # 重启并检查线上主服务（改过 unit 文件时需先执行 sudo systemctl daemon-reload）
 sudo systemctl restart wechat-relay.service
 curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
-  "https://wechat-dev.llink.cyou/relay/support/overview"
+  "https://wechat-dev.997881.xyz/relay/support/overview"
 ```
 
 ---

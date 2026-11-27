@@ -32,7 +32,7 @@
 
 ## 3. 开发环境
 
-在自建服务器进行开发并使用 GitHub（`master -> origin/main`）进行版本管理。微信云托管仅同步 [app.py](app.py) 作为 `2` 变量极简消息转发器（`WECHAT_FORWARD_URL`、`WECHAT_FORWARD_TOKEN`）；所有业务代码与模型/微信运行配置集中放在自有服务器的 `wechat-relay.service`、Nginx（`wechat-dev.llink.cyou`）与 `/etc/wechat-relay.env`（`0600`）。
+在自建服务器进行开发并使用 GitHub（`master -> origin/main`）进行版本管理。微信云托管仅同步 [app.py](app.py) 作为 `2` 变量极简消息转发器（`WECHAT_FORWARD_URL`、`WECHAT_FORWARD_TOKEN`）；所有业务代码与模型/微信运行配置集中放在自有服务器的 `wechat-relay.service`、Nginx（`wechat-dev.997881.xyz`）与 `/etc/wechat-relay.env`（`0600`）。
 
 ## 4. 测试环境
 
@@ -93,6 +93,7 @@
 - 自建服务器新增按角色鉴权的服务端渲染 Dashboard：普通馆员与管理员均可访问私信页，管理员独占总览与动态白名单管理；保留私信按未结案显示，影子回复状态不结案、不触发新的写入。
 - 管理员可新增或按账户 ID 与 OpenID 精确移除动态自动回复名单；环境变量静态名单只读，列表最多展示最近 200 项，旧项支持手工指定移除。自动实发状态按运行中的 pipeline 展示。
 - `/dashboard/` 仅接受配置的 HTTPS origin，表单变更要求同源 `Origin`；Nginx 只对 Dashboard 路径重定向 HTTP，其他既有 HTTP 路由不变。响应禁止缓存且仅发送来源 origin，systemd 只读挂载共享 demo 样式。本次未配置生产凭据或重启服务。
+- 2026-11-27 域名切换：因 `llink.cyou` 即将到期，将自建服务域名由 `wechat-dev.llink.cyou` 切换为 `wechat-dev.997881.xyz`（路由与服务配置保持不变，同步更新 Nginx、`SUPPORT_DASHBOARD_PUBLIC_ORIGIN` 与文档；微信云托管控制台 `WECHAT_FORWARD_URL` 需同步更新）。
 
 ## Reference
 
