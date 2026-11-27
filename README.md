@@ -39,6 +39,7 @@ flowchart LR
 |---|---|
 | [app.py](app.py) | 微信云托管入口；检测到 `WECHAT_FORWARD_URL` 且无 `WECHAT_TOKEN` 时自动进入纯转发模式。 |
 | [relay_receiver.py](relay_receiver.py) | 自建服务器 FastAPI 服务：Bearer 鉴权、`x-wx-*` 校验、JSONL 备份、`/relay/send-test` 与 `/relay/support/*` 管理接口。 |
+| [support_backend/dashboard.py](support_backend/dashboard.py) | HTTPS-only server-rendered librarian inbox and administrator operations/allowlist UI. |
 | [support_backend/schema.py](support_backend/schema.py) | SQLite DDL（`SCHEMA_VERSION=4`）与序列化工单/批次/澄清快照结构。 |
 | [support_backend/db.py](support_backend/db.py) | 线程安全 SQLite WAL 存储（`inbound_events`、`merge_batches`、`staff_cases`、`feedback_records`、`clarification_states`、`triage_runs`、`outbound_replies`、`auto_reply_allowlist`）。 |
 | [support_backend/filters.py](support_backend/filters.py) | 前置消息分类器（含灰度口令 `gray_enroll`）及 `Same Unresolved Staff Case?` 未结工单续接判定。 |
@@ -78,8 +79,17 @@ WECHAT_FORWARD_TOKEN=<与服务器 RELAY_AUTH_TOKEN 一致>
 | 微信客服 API 凭证 | `WECHAT_APP_ID`、`WECHAT_APP_SECRET` |
 | 模型与向量检索 | `SUPPORT_DECISION_BASE_URL`、`SUPPORT_DECISION_API_KEY`、`RAG_LLM_*`、`RAG_EMBEDDING_*` |
 | 调度与发信灰度开关 | `SUPPORT_AUTO_REPLY_ENABLED`、`SUPPORT_AUTO_REPLY_ALLOWLIST`、`SUPPORT_GRAY_ENROLL_KEYWORD`（默认为空关闭）、`SUPPORT_MERGE_ENABLED`（默认 `false`）、`SUPPORT_IMMEDIATE_MAX_PREEMPTS`（默认 `2`） |
+| Dashboard 鉴权与可信来源 | `SUPPORT_DASHBOARD_ADMIN_PASSWORD`、`SUPPORT_DASHBOARD_LIBRARIAN_PASSWORD`、`SUPPORT_DASHBOARD_PUBLIC_ORIGIN` |
 
-### 3. 日常运维与重建 `0.` 索引
+### 3. Dashboard 部署与权限
+
+设置管理员与普通馆员各自独立的 Basic Authentication 密码，并将公开 origin 固定为 `https://wechat-dev.llink.cyou`。配置值示例见环境模板；取消注释并替换密码后才会启用对应角色，未配置的角色返回 `404`。用户名固定为 `admin` 或 `librarian`。管理员可访问两个工作视图及白名单修改；普通馆员只能访问 `/dashboard/librarian`。Dashboard 不使用或暴露 `RELAY_AUTH_TOKEN`。
+
+Nginx 只将 `/dashboard/` 的 HTTP 请求重定向到 HTTPS；`/wechat`、`/healthz` 与现有 `/relay/*` 的 HTTP 行为保持不变，并反代 Dashboard 路径。应用还会校验 HTTPS scheme、精确 Host 与管理员表单的同源 `Origin`。Dashboard 响应设置 `no-store`、`strict-origin`（仅发送 origin，不发送路径），代理访问日志关闭。systemd 将共享样式只读挂载到 `support_backend/dashboard.css`，无需复制 demo CSS。请勿绕过 HTTPS 直接开放 `8090`。
+
+馆员页展示数据库中的读者私信，影子回复不会自动结案；此页不发送回复，也不结案工单。管理员页的动态名单支持新增与逐条删除，展示最近 200 条，较旧条目可按账户 ID 与 OpenID 精确删除。静态 `SUPPORT_AUTO_REPLY_ALLOWLIST` 仅显示计数，不会由界面修改。动态名单变化仅在实际白名单门控启用时影响实发资格；自动回复关闭时消息仍保持影子模式。
+
+### 4. 日常运维与重建 `0.` 索引
 
 ```bash
 # 仅对 0.*.md 语料重建 Tier 2 向量索引（离线载入 rag-poc/.env）
@@ -96,9 +106,9 @@ curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
 
 ---
 
-## 接口清单（[relay_receiver.py](relay_receiver.py)）
+## 接口清单（[relay_receiver.py](relay_receiver.py) 与 [support_backend/dashboard.py](support_backend/dashboard.py)）
 
-除 `GET /healthz` 外，所有 `/relay/*` 接口均强制校验 `Authorization: Bearer <RELAY_AUTH_TOKEN>`：
+除 `GET /healthz` 外，所有 `/relay/*` 接口均强制校验 `Authorization: Bearer <RELAY_AUTH_TOKEN>`；`/dashboard/*` 使用单独的角色密码与 HTTPS 校验：
 
 | 方法与路径 | 用途 |
 |---|---|
@@ -112,6 +122,10 @@ curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
 | `POST /relay/support/allowlist/remove` / `allowlist/clear` | 从动态灰度白名单移除指定 `reader_id` 或清空全部动态白名单 |
 | `POST /relay/support/flush-due` | 手工冲刷已到期 debounce 批次 |
 | `GET /relay/support/presets` | 查看已加载的 `1.` 固定答案及别名清单 |
+| `GET /dashboard/librarian` | 普通馆员与管理员查看实际读者私信；消息保持未结。 |
+| `GET /dashboard/admin` | 管理员查看 SQLite 运营汇总与动态白名单。 |
+| `POST /dashboard/admin/allowlist/add` / `allowlist/remove` | 管理员逐条新增或精确移除动态白名单，要求同源表单。 |
+| `GET /dashboard/static/dashboard.css` | 提供共享 demo 样式，不含业务数据。 |
 
 ---
 
@@ -119,6 +133,7 @@ curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
 
 - **只支持明文转发与直连直发**：云托管 `CheckContainerPath` 直接返回 `200 success` 不外发；自建后端校验 `RELAY_AUTH_TOKEN` 及 `x-wx-source` / `x-wx-env` / `x-wx-appid`。
 - **日志脱敏**：运行日志不打印 OpenID、消息正文、凭据或模型完整异常；发信错误仅保留 ASCII 安全 `errmsg`。
+- **Dashboard 隐私与权限**：每个角色使用独立 `SUPPORT_DASHBOARD_*_PASSWORD`；公开 origin 必须精确匹配 HTTPS `Host`，表单修改必须有同源 `Origin`。动态名单条目可能影响自动回复实发，环境变量静态名单只读；`/dashboard/librarian` 始终只读。
 - **灰度保护**：`SUPPORT_AUTO_REPLY_ALLOWLIST` 或 `SUPPORT_GRAY_ENROLL_KEYWORD` 任一非空时即启用白名单门控（仅允许静态白名单及通过环境变量口令持久化入组的 OpenID 真实调用微信客服 API；未配置口令时默认关闭且代码不硬编码口令），其余读者消息全链路处理并留痕于 `outbound_replies(status='shadow')`。
 - **原始数据留存**：`inbound_events` 自动写入 `7` 天过期基准 `expires_at_epoch`，所有 SQLite 文件（`/var/lib/private/wechat-relay/`）与 `.env` 均处于 `.gitignore` 与版本库之外。
 

@@ -757,3 +757,239 @@ a:focus-visible {
     scroll-behavior: auto !important;
   }
 }
+
+.status-note,
+.form-notice {
+  margin: 0 0 17px;
+  padding: 9px 12px;
+  color: var(--ink);
+  background: var(--green-soft);
+  border-block: 1px solid var(--rule);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.form-notice {
+  margin-top: 12px;
+}
+
+.panel--allowlist {
+  grid-column: 1 / -1;
+}
+
+.allowlist-explainer {
+  max-width: 76ch;
+  margin: 0 0 14px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.allowlist-add-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  margin: 0 0 20px;
+}
+
+.allowlist-add-form label,
+.allowlist-remove-known label:not(.confirm-label) {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.form-control {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 10px;
+  color: var(--body-ink);
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius-small);
+  font: inherit;
+}
+
+.form-control:focus-visible,
+.button:focus-visible,
+.confirm-label input:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 7px 12px;
+  color: var(--surface);
+  background: var(--ink);
+  border: 1px solid var(--ink);
+  border-radius: var(--radius-small);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.button--quiet {
+  color: var(--ink);
+  background: var(--surface);
+  border-color: var(--rule-strong);
+}
+
+@media (hover: hover) {
+  .button:hover {
+    color: var(--surface);
+    background: var(--green);
+    border-color: var(--green);
+  }
+
+  .button--quiet:hover {
+    color: var(--ink);
+    background: var(--green-soft);
+    border-color: var(--rule-strong);
+  }
+}
+
+.allowlist-table {
+  min-width: 760px;
+  table-layout: fixed;
+}
+
+.allowlist-table th:nth-child(1) { width: 14%; }
+.allowlist-table th:nth-child(2) { width: 31%; }
+.allowlist-table th:nth-child(3) { width: 13%; }
+.allowlist-table th:nth-child(4) { width: 22%; }
+.allowlist-table th:nth-child(5) { width: 20%; }
+
+.allowlist-table td {
+  vertical-align: top;
+}
+
+.allowlist-table code {
+  color: var(--body-ink);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.allowlist-remove {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 8px;
+}
+
+.confirm-label {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 6px;
+  color: var(--body-ink);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.confirm-label input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.allowlist-remove-known {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto auto;
+  align-items: end;
+  gap: 10px 12px;
+  margin-top: 17px;
+  padding-top: 12px;
+  border-top: 1px solid var(--rule);
+}
+
+.allowlist-remove-known .subsection-title {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 560px) {
+  .allowlist-add-form,
+  .allowlist-remove-known {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .allowlist-remove-known .subsection-title {
+    grid-column: 1;
+  }
+
+  .allowlist-add-form .button,
+  .allowlist-remove-known > .button {
+    justify-self: start;
+  }
+}
+
+.case-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.case-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.75rem 1rem;
+  padding: 0.9rem 0;
+  border-top: 1px solid var(--rule);
+}
+
+.case-row:first-child {
+  border-top: 0;
+}
+
+.case-main {
+  min-width: 0;
+}
+
+.case-main h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.case-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.8rem;
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.case-state {
+  align-self: start;
+  color: var(--muted);
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.thread {
+  max-width: 70ch;
+  margin: 0.45rem 0 0.2rem;
+  padding: 0.65rem 0.8rem;
+  background: oklch(0.95 0.015 96);
+  line-height: 1.75;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .case-row {
+    gap: 0.55rem;
+  }
+}

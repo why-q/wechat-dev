@@ -41,6 +41,7 @@ from support_backend import (
     Tier2KnowledgeResponder,
 )
 
+from support_backend.dashboard import router as _dashboard_router
 
 from support_backend.shared import (
     env_bool as _env_bool,
@@ -510,6 +511,7 @@ app = FastAPI(
     redirect_slashes=False,
     lifespan=_lifespan,
 )
+app.include_router(_dashboard_router)
 
 
 @app.get("/healthz", response_class=PlainTextResponse)

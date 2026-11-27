@@ -9,6 +9,7 @@ DynamicUser=yes
 WorkingDirectory=/srv/wechat-relay
 BindReadOnlyPaths=/root/Work/wechat_dev_test/relay_receiver.py:/srv/wechat-relay/relay_receiver.py
 BindReadOnlyPaths=/root/Work/wechat_dev_test/support_backend:/srv/wechat-relay/support_backend
+BindReadOnlyPaths=/root/Work/wechat_dev_test/docs/dashboard-demo/dashboard.css:/srv/wechat-relay/support_backend/dashboard.css
 BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/corpus:/srv/wechat-relay/rag-poc/corpus
 BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/index_v2:/srv/wechat-relay/rag-poc/index_v2
 BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/.venv:/srv/wechat-relay/.venv
@@ -23,7 +24,7 @@ Environment=SUPPORT_INDEX_DIR=/srv/wechat-relay/rag-poc/index_v2
 Environment=RAG_NLTK_DATA_DIR=/var/lib/private/wechat-relay/nltk_data
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/srv/wechat-relay/.venv/bin/python -m uvicorn relay_receiver:app --app-dir /srv/wechat-relay --host 127.0.0.1 --port 8090 --no-access-log --no-server-header
+ExecStart=/srv/wechat-relay/.venv/bin/python -m uvicorn relay_receiver:app --app-dir /srv/wechat-relay --host 127.0.0.1 --port 8090 --proxy-headers --forwarded-allow-ips=127.0.0.1 --no-access-log --no-server-header
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=30

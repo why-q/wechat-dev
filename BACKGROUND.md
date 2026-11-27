@@ -88,6 +88,12 @@
 - **2026-11-27 · 代码结构整理与全局文档同步**：抽离 [support_backend/schema.py](support_backend/schema.py)（SQLite DDL 与快照数据类）和 [support_backend/shared.py](support_backend/shared.py)（公共环境变量、UTF-8 截断与脱敏工具），消除 [relay_receiver.py](relay_receiver.py)、[pipeline.py](support_backend/pipeline.py)、[responder.py](support_backend/responder.py) 与 [db.py](support_backend/db.py) 间的重复逻辑并将 Tier 2 澄清生成封装回 `Tier2KnowledgeResponder`；同时重写过时的 [README.md](README.md) 并全面对齐各阶段文档与 [BACKGROUND.md](BACKGROUND.md) 现状。
 - **2026-11-27 · 私信口令动态灰度白名单（默认关闭、仅 env 配置）**：在第 4 步前新增灰度自助入组机制：仅当服务端 `/etc/wechat-relay.env` 配置非空 `SUPPORT_GRAY_ENROLL_KEYWORD` 时开启（未设置默认关闭，代码、测试与仓库文档均不硬编码口令）。读者私信整句发送配置口令时在 `Filter`（`gray_enroll`）阶段即刻写入 SQLite `auto_reply_allowlist` 表（`SCHEMA_VERSION=4`），不进入问答合批、不触发待办追加也不消耗澄清额度，并实时回传确认消息；`SUPPORT_AUTO_REPLY_ALLOWLIST` 或 `SUPPORT_GRAY_ENROLL_KEYWORD` 任一非空即开启白名单门控（清空静态白名单时仍拦截未入组读者为 `shadow`），同时放行静态白名单与动态入组用户，并配套 `/relay/support/allowlist`、`/relay/support/allowlist/remove` 与 `/relay/support/allowlist/clear` 管理接口。
 
+### 2026-11-27 · 第四步：实时 Dashboard 与管理员灰度名单
+
+- 自建服务器新增按角色鉴权的服务端渲染 Dashboard：普通馆员与管理员均可访问私信页，管理员独占总览与动态白名单管理；保留私信按未结案显示，影子回复状态不结案、不触发新的写入。
+- 管理员可新增或按账户 ID 与 OpenID 精确移除动态自动回复名单；环境变量静态名单只读，列表最多展示最近 200 项，旧项支持手工指定移除。自动实发状态按运行中的 pipeline 展示。
+- `/dashboard/` 仅接受配置的 HTTPS origin，表单变更要求同源 `Origin`；Nginx 只对 Dashboard 路径重定向 HTTP，其他既有 HTTP 路由不变。响应禁止缓存且仅发送来源 origin，systemd 只读挂载共享 demo 样式。本次未配置生产凭据或重启服务。
+
 ## Reference
 
 - [消息与事件推送介绍](https://developers.weixin.qq.com/doc/subscription/guide/dev/push/)
