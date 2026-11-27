@@ -811,6 +811,16 @@ async def flush_due_support_batches(request: Request) -> JSONResponse:
     )
 
 
+@app.post("/relay/support/purge-expired", response_class=JSONResponse)
+async def purge_expired_support_events(request: Request) -> JSONResponse:
+    pipeline = _require_authed_pipeline(request)
+    deleted = await pipeline.purge_expired_now()
+    return JSONResponse(
+        {"ok": True, "purged_events": deleted},
+        headers=_HEADERS,
+    )
+
+
 @app.get("/relay/support/triage-runs", response_class=JSONResponse)
 async def list_support_triage_runs(
     request: Request,

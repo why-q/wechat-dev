@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1162,6 +1163,738 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
             shadow_readers = [r["reader_id"] for r in replies if r["status"] == "shadow"]
             self.assertEqual(shadow_readers.count("o_stranger"), 2)
             self.assertEqual(shadow_readers.count("o_user_1"), 1)
+        finally:
+            store.close()
+
+
+class ExpiryPurgeAndDashboardAnalyticsTests(unittest.TestCase):
+    _UTC8 = timezone(timedelta(hours=8))
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmpdir.name) / "analytics.db"
+        self.log_path = Path(self.tmpdir.name) / "events.jsonl"
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def _epoch_utc8(self, year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> float:
+        return datetime(year, month, day, hour, minute, tzinfo=self._UTC8).timestamp()
+
+    def test_purge_expired_events_fk_cleanup_and_active_batch_protection(self):
+        t0 = self._epoch_utc8(2026, 11, 20, 10, 0)
+        clock = FakeClock(t0)
+        store = SupportStore(
+            self.db_path,
+            quiet_seconds=3.0,
+            max_wait_seconds=10.0,
+            merge_enabled=True,
+            retention_seconds=7 * 24 * 3600,
+            clock=clock,
+        )
+        try:
+            # 1. Expired question in a flushed batch -> batch_messages + inbound_events deleted.
+            r_flushed = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_flushed", "msg_type": "text", "msg_id": "exp_flushed", "content": "借书怎么续借"},
+                classify_message("text", "借书怎么续借"),
+            )
+            clock.advance(4.0)
+            flushed = store.flush_due_batches()
+            self.assertEqual(len(flushed), 1)
+
+            # 2. Expired emergency linked to staff_case_messages -> event deleted, message kept with event_seq=NULL.
+            r_emerg = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_emerg", "msg_type": "text", "msg_id": "exp_emerg", "content": "我被锁在图书馆了"},
+                classify_message("text", "我被锁在图书馆了"),
+            )
+            self.assertIsNotNone(r_emerg.staff_case_id)
+
+            # 3. Expired question still in an OPEN batch -> MUST be protected.
+            r_open = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_open", "msg_type": "text", "msg_id": "exp_open", "content": "开馆时间"},
+                classify_message("text", "开馆时间"),
+            )
+            self.assertEqual(r_open.batch.status, "open")
+
+            # 4. Expired questions in PROCESSING and QUEUED batches -> MUST be protected.
+            store.merge_enabled = False
+            store.max_preempts = 0
+            r_proc = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_imm", "msg_type": "text", "msg_id": "exp_proc", "content": "无线网怎么连"},
+                classify_message("text", "无线网怎么连"),
+            )
+            r_queued = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_imm", "msg_type": "text", "msg_id": "exp_queued", "content": "还有账号密码"},
+                classify_message("text", "还有账号密码"),
+            )
+            self.assertEqual(r_proc.batch.status, "processing")
+            self.assertEqual(r_queued.batch.status, "queued")
+            store.merge_enabled = True
+
+            # 5. Unexpired row (received 5 days later) -> MUST NOT be purged at day 7 + 1h.
+            clock.now = t0 + 5 * 24 * 3600
+            r_fresh = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_fresh", "msg_type": "text", "msg_id": "fresh_1", "content": "座位怎么预约"},
+                classify_message("text", "座位怎么预约"),
+            )
+
+            # 6. Event with NULL expires_at_epoch -> MUST NOT be purged.
+            store.retention_seconds = 0.0
+            r_forever = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_forever", "msg_type": "text", "msg_id": "forever_1", "content": "你好"},
+                classify_message("text", "你好"),
+            )
+            store.retention_seconds = 7 * 24 * 3600
+
+            # Advance past 7-day expiry of the first wave.
+            purge_time = t0 + 7 * 24 * 3600 + 3600
+            deleted = store.purge_expired_events(now_epoch=purge_time)
+            self.assertEqual(deleted, 2)  # r_flushed + r_emerg
+
+            # Second call with no remaining eligible rows returns 0.
+            self.assertEqual(store.purge_expired_events(now_epoch=purge_time), 0)
+
+            remaining_seqs = {
+                int(r["seq"])
+                for r in store._conn.execute("SELECT seq FROM inbound_events").fetchall()
+            }
+            self.assertNotIn(r_flushed.seq, remaining_seqs)
+            self.assertNotIn(r_emerg.seq, remaining_seqs)
+            self.assertIn(r_open.seq, remaining_seqs)
+            self.assertIn(r_proc.seq, remaining_seqs)
+            self.assertIn(r_queued.seq, remaining_seqs)
+            self.assertIn(r_fresh.seq, remaining_seqs)
+            self.assertIn(r_forever.seq, remaining_seqs)
+
+            # Flushed batch's batch_messages row was removed, while open/processing/queued remain.
+            bm_seqs = {
+                int(r["event_seq"])
+                for r in store._conn.execute("SELECT event_seq FROM batch_messages").fetchall()
+            }
+            self.assertNotIn(r_flushed.seq, bm_seqs)
+            self.assertEqual(bm_seqs, {r_open.seq, r_proc.seq, r_queued.seq, r_fresh.seq})
+
+            # staff_case_messages preserved with event_seq = NULL.
+            scm_rows = store._conn.execute(
+                "SELECT case_id, event_seq, content FROM staff_case_messages WHERE case_id = ?",
+                (r_emerg.staff_case_id,),
+            ).fetchall()
+            self.assertEqual(len(scm_rows), 1)
+            self.assertIsNone(scm_rows[0]["event_seq"])
+            self.assertEqual(scm_rows[0]["content"], "我被锁在图书馆了")
+        finally:
+            store.close()
+
+    def test_pipeline_startup_and_periodic_expiry_purge(self):
+        # 1. Startup purge + error resilience.
+        t0 = self._epoch_utc8(2026, 11, 20, 9, 0)
+        clock = FakeClock(t0)
+        store = SupportStore(
+            self.db_path,
+            merge_enabled=False,
+            retention_seconds=60.0,
+            clock=clock,
+        )
+        store.ingest_event(
+            {"to_user": "gh_lib", "from_user": "o_old", "msg_type": "text", "msg_id": "old_1", "content": "你好"},
+            classify_message("text", "你好"),
+        )
+        clock.advance(120.0)
+        pipeline = SupportPipeline(store, purge_interval_seconds=3600.0)
+
+        async def run_startup():
+            await pipeline.start()
+            try:
+                self.assertEqual(store.list_events(limit=10), [])
+            finally:
+                await pipeline.stop()
+
+        asyncio.run(run_startup())
+
+        # Startup error logs warning and does not crash start().
+        with patch.object(store, "purge_expired_events", side_effect=RuntimeError("boom")):
+            async def run_startup_error():
+                with self.assertLogs("uvicorn.error", level="WARNING") as captured:
+                    await pipeline.start()
+                await pipeline.stop()
+                self.assertTrue(any("startup expiry purge failed" in line for line in captured.output))
+
+            asyncio.run(run_startup_error())
+        store.close()
+
+        # 2. Periodic purge triggers in _scheduler_loop even when NO open batches exist.
+        db2 = Path(self.tmpdir.name) / "periodic.db"
+        store2 = SupportStore(db2, merge_enabled=True, retention_seconds=0.04)
+        pipeline2 = SupportPipeline(store2, purge_interval_seconds=0.05)
+
+        async def run_periodic():
+            await pipeline2.start()
+            try:
+                store2.ingest_event(
+                    {"to_user": "gh_lib", "from_user": "o_p", "msg_type": "text", "msg_id": "per_1", "content": "你好"},
+                    classify_message("text", "你好"),
+                )
+                self.assertEqual(len(store2.list_events(limit=10)), 1)
+                self.assertIsNone(store2.next_open_deadline())
+                await asyncio.sleep(0.16)
+                self.assertEqual(store2.list_events(limit=10), [])
+            finally:
+                await pipeline2.stop()
+                store2.close()
+
+        asyncio.run(run_periodic())
+
+        # 3. Disabled periodic purge (<=0) allows manual purge_expired_now().
+        db3 = Path(self.tmpdir.name) / "manual.db"
+        clock3 = FakeClock(t0)
+        store3 = SupportStore(db3, merge_enabled=False, retention_seconds=10.0, clock=clock3)
+        pipeline3 = SupportPipeline(store3, purge_interval_seconds=0.0)
+
+        async def run_manual():
+            await pipeline3.start()
+            try:
+                store3.ingest_event(
+                    {"to_user": "gh_lib", "from_user": "o_m", "msg_type": "text", "msg_id": "man_1", "content": "你好"},
+                    classify_message("text", "你好"),
+                )
+                clock3.advance(20.0)
+                pipeline3.notify_scheduler()
+                await asyncio.sleep(0.03)
+                # Periodic purge disabled -> still present until manual call.
+                self.assertEqual(len(store3.list_events(limit=10)), 1)
+                purged = await pipeline3.purge_expired_now()
+                self.assertEqual(purged, 1)
+                self.assertEqual(store3.list_events(limit=10), [])
+            finally:
+                await pipeline3.stop()
+                store3.close()
+
+        asyncio.run(run_manual())
+
+    def test_http_purge_expired_endpoint(self):
+        token = "purge-http-token"
+        auth = {"authorization": f"Bearer {token}"}
+
+        async def run_http():
+            with (
+                patch.object(relay_receiver, "_AUTH_TOKEN", token),
+                patch.object(relay_receiver, "_LOG_PATH", self.log_path),
+                patch.object(relay_receiver, "_SUPPORT_DB_PATH_RAW", str(self.db_path)),
+                patch.object(relay_receiver, "_SUPPORT_MERGE_ENABLED", False),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ENABLED", False),
+            ):
+                async with relay_receiver._lifespan(relay_receiver.app):
+                    unauth_code, _ = await _async_asgi_request(
+                        relay_receiver.app, "POST", "/relay/support/purge-expired"
+                    )
+                    self.assertEqual(unauth_code, 401)
+
+                    store = relay_receiver.app.state.support_pipeline.store
+                    old_epoch = store.now() - (8 * 24 * 3600)
+                    store.ingest_event(
+                        {"to_user": "gh_lib", "from_user": "o_old", "msg_type": "text", "msg_id": "hp1", "content": "你好"},
+                        classify_message("text", "你好"),
+                        received_at_epoch=old_epoch,
+                    )
+                    store.ingest_event(
+                        {"to_user": "gh_lib", "from_user": "o_new", "msg_type": "text", "msg_id": "hp2", "content": "你好"},
+                        classify_message("text", "你好"),
+                    )
+
+                    code, body = await _async_asgi_request(
+                        relay_receiver.app,
+                        "POST",
+                        "/relay/support/purge-expired",
+                        headers=auth,
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertEqual(json.loads(body), {"ok": True, "purged_events": 1})
+
+                    code2, body2 = await _async_asgi_request(
+                        relay_receiver.app,
+                        "POST",
+                        "/relay/support/purge-expired",
+                        headers=auth,
+                    )
+                    self.assertEqual(code2, 200)
+                    self.assertEqual(json.loads(body2), {"ok": True, "purged_events": 0})
+
+        asyncio.run(run_http())
+
+    def test_dashboard_admin_analytics_empty_and_populated(self):
+        # Saturday 2026-11-28 14:35 UTC+8
+        now_ep = self._epoch_utc8(2026, 11, 28, 14, 35)
+        clock = FakeClock(now_ep)
+        store = SupportStore(self.db_path, merge_enabled=True, clock=clock)
+        try:
+            empty = store.dashboard_admin_analytics(now_epoch=now_ep)
+            self.assertEqual(empty["snapshot_at_utc8"], "2026-11-28 14:35")
+            self.assertEqual(empty["snapshot_hm"], "14:35")
+            self.assertEqual(empty["date_range_label"], "11/22–11/28")
+            self.assertEqual(len(empty["daily_inbound"]), 7)
+            self.assertEqual(empty["daily_inbound"][0], {"date": "2026-11-22", "label": "22日", "count": 0})
+            self.assertEqual(empty["daily_inbound"][-1], {"date": "2026-11-28", "label": "28六", "count": 0})
+            self.assertEqual(empty["inbound_7d_total"], 0)
+            self.assertEqual(empty["inbound_7d_avg"], 0.0)
+            self.assertEqual(empty["inbound_today_total"], 0)
+            self.assertEqual(empty["inbound_all_total"], 0)
+            self.assertIsNone(empty["inbound_delta_pct"])
+            self.assertEqual(empty["hourly_range_label"], "08–16h")
+            self.assertEqual([h["hour"] for h in empty["hourly_inbound_today"]], list(range(8, 17)))
+            self.assertEqual(empty["replies_today"], {"sent": 0, "shadow": 0, "failed": 0, "total": 0})
+            self.assertEqual(empty["replies_all"], {"sent": 0, "shadow": 0, "failed": 0, "total": 0})
+            self.assertEqual(
+                empty["filter_7d"],
+                {
+                    "question": 0,
+                    "feedback": 0,
+                    "invalid": 0,
+                    "unsupported": 0,
+                    "emergency": 0,
+                    "gray_enroll": 0,
+                    "total_non_gray": 0,
+                },
+            )
+            self.assertEqual(
+                empty["routing_7d"],
+                {
+                    "tier1_preset": 0,
+                    "tier2_rag": 0,
+                    "clarify": 0,
+                    "staff_fallback": 0,
+                    "other": 0,
+                    "total": 0,
+                    "auto_rate_pct": None,
+                },
+            )
+            self.assertEqual(
+                empty["batches"],
+                {"open": 0, "processing": 0, "queued": 0, "flushed": 0, "active_total": 0},
+            )
+            self.assertEqual(empty["open_cases"], {"total": 0, "emergency": 0, "staff_todo": 0})
+            self.assertEqual(empty["recent_alerts"], [])
+
+            # Populate prior 7-day window (2 events on 11/18 and 11/21).
+            for idx, ep in enumerate(
+                [self._epoch_utc8(2026, 11, 18, 10, 0), self._epoch_utc8(2026, 11, 21, 23, 30)],
+                start=1,
+            ):
+                store.ingest_event(
+                    {"to_user": "gh_lib", "from_user": f"o_prior_{idx}", "msg_type": "text", "msg_id": f"pr{idx}", "content": "你好"},
+                    classify_message("text", "你好"),
+                    received_at_epoch=ep,
+                )
+
+            # Populate last 7 days:
+            # 11/22: question (flushed)
+            r_q1 = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_u1", "msg_type": "text", "msg_id": "d1", "content": "保密问题一"},
+                classify_message("text", "保密问题一"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 22, 11, 0),
+            )
+            store.flush_batch(r_q1.batch.batch_id, now_epoch=self._epoch_utc8(2026, 11, 22, 11, 1))
+
+            # 11/25: feedback + unsupported
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_u2", "msg_type": "text", "msg_id": "d2", "content": "建议增加座位"},
+                classify_message("text", "建议增加座位"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 25, 15, 0),
+            )
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_u2", "msg_type": "image", "msg_id": "d3", "content": ""},
+                classify_message("image", ""),
+                received_at_epoch=self._epoch_utc8(2026, 11, 25, 16, 0),
+            )
+
+            # 11/28 (today):
+            # - 06:15 invalid (extends hourly start to 06)
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_u3", "msg_type": "text", "msg_id": "t1", "content": "你好"},
+                classify_message("text", "你好"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 6, 15),
+            )
+            # - 10:20 emergency (creates open emergency case + alert)
+            r_em = store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_emerg", "msg_type": "text", "msg_id": "t2", "content": "绝密紧急求助内容我被锁在图书馆了"},
+                classify_message("text", "绝密紧急求助内容我被锁在图书馆了"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 10, 20),
+            )
+            # - 14:10 gray_enroll
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_gray", "msg_type": "text", "msg_id": "t3", "content": "暗号"},
+                classify_message("text", "暗号", gray_enroll_keyword="暗号"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 14, 10),
+            )
+            # - 19:05 question (stays open batch, extends hourly end to 19)
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_open", "msg_type": "text", "msg_id": "t4", "content": "绝密读者问题"},
+                classify_message("text", "绝密读者问题"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 19, 5),
+            )
+
+            # Staff todo case (open) for open_cases split & triage fallback alert.
+            todo_case = store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_secret_todo",
+                summary="绝密待办摘要",
+                latest_message="绝密待办正文",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 11, 0),
+            )
+
+            # Outbound replies: 1 yesterday (sent), 3 today (sent, shadow, failed with errcode 45015, failed without errcode).
+            store.record_outbound_reply(
+                account_id="gh_lib",
+                reader_id="o_secret_u1",
+                trigger_kind="triage",
+                trigger_ref_id=r_q1.batch.batch_id,
+                content="yesterday",
+                delivery_mode="direct_https",
+                status="sent",
+                now_epoch=self._epoch_utc8(2026, 11, 27, 12, 0),
+            )
+            store.record_outbound_reply(
+                account_id="gh_lib",
+                reader_id="o_secret_u1",
+                trigger_kind="triage",
+                trigger_ref_id=r_q1.batch.batch_id,
+                content="today sent",
+                delivery_mode="direct_https",
+                status="sent",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 9, 0),
+            )
+            store.record_outbound_reply(
+                account_id="gh_lib",
+                reader_id="o_secret_u2",
+                trigger_kind="triage",
+                trigger_ref_id=r_q1.batch.batch_id,
+                content="today shadow",
+                delivery_mode="shadow",
+                status="shadow",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 9, 30),
+            )
+            store.record_outbound_reply(
+                account_id="gh_lib",
+                reader_id="o_secret_fail1",
+                trigger_kind="triage",
+                trigger_ref_id=r_q1.batch.batch_id,
+                content="绝密失败回复1",
+                delivery_mode="direct_https",
+                status="failed",
+                errcode=45015,
+                errmsg="response time out",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 12, 5),
+            )
+            store.record_outbound_reply(
+                account_id="gh_lib",
+                reader_id="o_secret_fail2",
+                trigger_kind="triage",
+                trigger_ref_id=r_q1.batch.batch_id,
+                content="绝密失败回复2",
+                delivery_mode="direct_https",
+                status="failed",
+                errcode=None,
+                errmsg="TimeoutError",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 13, 15),
+            )
+
+            # Triage runs across all 5 routing buckets + 3 fallback runs to verify alert cap=5.
+            triage_specs = [
+                ("exact_alias", None, self._epoch_utc8(2026, 11, 23, 10, 0)),
+                ("decision_preset", None, self._epoch_utc8(2026, 11, 24, 10, 0)),
+                ("tier2_short", None, self._epoch_utc8(2026, 11, 25, 10, 0)),
+                ("tier2_long", None, self._epoch_utc8(2026, 11, 26, 10, 0)),
+                ("decision_clarify", None, self._epoch_utc8(2026, 11, 27, 10, 0)),
+                ("tier2_staff", todo_case.case_id, self._epoch_utc8(2026, 11, 28, 11, 10)),
+                ("clarify_limit_fallback", todo_case.case_id, self._epoch_utc8(2026, 11, 28, 12, 30)),
+                ("staff_case_appended", todo_case.case_id, self._epoch_utc8(2026, 11, 28, 14, 0)),
+                ("custom_experimental", None, self._epoch_utc8(2026, 11, 28, 14, 15)),
+                # Outside 7d window -> excluded from routing_7d.
+                ("exact_alias", None, self._epoch_utc8(2026, 11, 19, 10, 0)),
+            ]
+            for stage, cid, ep in triage_specs:
+                store.record_triage_run(
+                    batch_id=r_q1.batch.batch_id,
+                    account_id="gh_lib",
+                    reader_id="o_secret_triage",
+                    generation=1,
+                    clarified_already=False,
+                    stage_path=stage,
+                    reply_preview="绝密回复预览",
+                    staff_case_id=cid,
+                    now_epoch=ep,
+                )
+
+            data = store.dashboard_admin_analytics(now_epoch=now_ep)
+            self.assertEqual(data["inbound_7d_total"], 7)
+            self.assertEqual(data["inbound_7d_avg"], 1.0)
+            self.assertEqual(data["inbound_today_total"], 4)
+            self.assertEqual(data["inbound_all_total"], 9)
+            # (7 - 2) / 2 * 100 = 250.0
+            self.assertEqual(data["inbound_delta_pct"], 250.0)
+            self.assertEqual(data["hourly_range_label"], "06–19h")
+            hourly_map = {item["hour"]: item["count"] for item in data["hourly_inbound_today"]}
+            self.assertEqual(hourly_map[6], 1)
+            self.assertEqual(hourly_map[10], 1)
+            self.assertEqual(hourly_map[14], 1)
+            self.assertEqual(hourly_map[19], 1)
+            self.assertEqual(hourly_map[8], 0)
+
+            self.assertEqual(data["replies_today"], {"sent": 1, "shadow": 1, "failed": 2, "total": 4})
+            self.assertEqual(data["replies_all"], {"sent": 2, "shadow": 1, "failed": 2, "total": 5})
+
+            self.assertEqual(
+                data["filter_7d"],
+                {
+                    "question": 2,
+                    "feedback": 1,
+                    "invalid": 1,
+                    "unsupported": 1,
+                    "emergency": 1,
+                    "gray_enroll": 1,
+                    "total_non_gray": 6,
+                },
+            )
+            # 9 triage runs in 7d: tier1=2, tier2=2, clarify=1, staff_fallback=3, other=1 -> auto_rate = (9-3)/9 = 66.7
+            self.assertEqual(
+                data["routing_7d"],
+                {
+                    "tier1_preset": 2,
+                    "tier2_rag": 2,
+                    "clarify": 1,
+                    "staff_fallback": 3,
+                    "other": 1,
+                    "total": 9,
+                    "auto_rate_pct": 66.7,
+                },
+            )
+            self.assertEqual(
+                data["batches"],
+                {"open": 1, "processing": 0, "queued": 0, "flushed": 1, "active_total": 1},
+            )
+            self.assertEqual(data["open_cases"], {"total": 2, "emergency": 1, "staff_todo": 1})
+
+            # Recent alerts capped at 5 newest, ordered newest first:
+            # 14:00 staff_fallback, 13:15 reply_failed (no errcode), 12:30 staff_fallback, 12:05 reply_failed (45015), 11:10 staff_fallback
+            # (10:20 emergency is 6th oldest so pushed out; verify exact order & text)
+            self.assertEqual(len(data["recent_alerts"]), 5)
+            self.assertEqual(
+                [(a["time_hm"], a["kind"], a["badge"], a["severity"], a["text"]) for a in data["recent_alerts"]],
+                [
+                    ("14:00", "staff_fallback", "馆员兜底", "muted", "自动问答转人工待办处理"),
+                    ("13:15", "reply_failed", "发信失败", "urgent", "微信客服接口请求失败"),
+                    ("12:30", "staff_fallback", "馆员兜底", "muted", "自动问答转人工待办处理"),
+                    ("12:05", "reply_failed", "发信失败", "urgent", "微信客服接口请求失败 (45015)"),
+                    ("11:10", "staff_fallback", "馆员兜底", "muted", "自动问答转人工待办处理"),
+                ],
+            )
+            # Confirm emergency alert format when within top 5 (e.g. if a newer emergency arrives).
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_secret_emerg2", "msg_type": "text", "msg_id": "t_em2", "content": "三楼有人晕倒了"},
+                classify_message("text", "三楼有人晕倒了"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 14, 30),
+            )
+            data2 = store.dashboard_admin_analytics(now_epoch=now_ep)
+            self.assertEqual(data2["recent_alerts"][0]["kind"], "emergency")
+            self.assertEqual(data2["recent_alerts"][0]["badge"], "紧急事件")
+            self.assertEqual(data2["recent_alerts"][0]["severity"], "urgent")
+            self.assertEqual(data2["recent_alerts"][0]["text"], "收到紧急情况登记，已回复联系方式")
+
+            # Strict sanitization check: no OpenID or raw reader text anywhere in admin analytics.
+            serialized = json.dumps(data2, ensure_ascii=False)
+            for forbidden in (
+                "o_secret_",
+                "保密问题一",
+                "绝密紧急求助内容",
+                "绝密读者问题",
+                "绝密待办",
+                "绝密失败回复",
+                "绝密回复预览",
+                "三楼有人晕倒了",
+            ):
+                self.assertNotIn(forbidden, serialized)
+        finally:
+            store.close()
+
+    def test_dashboard_librarian_analytics_empty_populated_and_no_reader_id(self):
+        now_ep = self._epoch_utc8(2026, 11, 28, 14, 30)
+        clock = FakeClock(now_ep)
+        store = SupportStore(self.db_path, merge_enabled=True, clock=clock)
+        try:
+            empty = store.dashboard_librarian_analytics(now_epoch=now_ep)
+            self.assertEqual(empty["snapshot_at_utc8"], "2026-11-28 14:30")
+            self.assertEqual(empty["open_emergency"], [])
+            self.assertEqual(empty["open_todo"], [])
+            self.assertEqual(empty["open_counts"], {"total": 0, "emergency": 0, "staff_todo": 0})
+            self.assertEqual(
+                empty["wait_buckets"],
+                {"emergency": 0, "over_60m": 0, "m30_60": 0, "under_30m": 0},
+            )
+            self.assertEqual(empty["longest_wait"], {"minutes": 0, "created_hm": "", "summary": ""})
+            self.assertEqual(empty["today_stats"], {"created": 0, "closed": 0, "close_rate_pct": None})
+            self.assertEqual(
+                empty["response_stats"],
+                {"avg_minutes": None, "recent_durations": [], "sample_count": 0, "scope": "recent"},
+            )
+            self.assertEqual(
+                empty["latency_buckets"],
+                {
+                    "le_10m": 0,
+                    "m10_20": 0,
+                    "m20_30": 0,
+                    "gt_30m": 0,
+                    "total": 0,
+                    "within_30m_pct": None,
+                    "scope": "recent",
+                },
+            )
+            self.assertEqual(empty["hourly_range_label"], "09–16h")
+            self.assertEqual([h["label"] for h in empty["hourly_pace_today"]], [f"{h:02d}:00" for h in range(9, 17)])
+            self.assertEqual(empty["recent_closed"], [])
+            self.assertEqual(empty["recent_feedbacks"], [])
+
+            # Yesterday closed case -> test fallback to scope="recent" before any case is closed today.
+            c_old = store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_hidden_old",
+                summary="昨日工单",
+                latest_message="昨日问题",
+                now_epoch=self._epoch_utc8(2026, 11, 27, 10, 0),
+            )
+            store.close_staff_case(
+                c_old.case_id,
+                resolution_note="昨日处理完成",
+                now_epoch=self._epoch_utc8(2026, 11, 27, 10, 25),
+            )
+            recent_fallback = store.dashboard_librarian_analytics(now_epoch=now_ep)
+            self.assertEqual(recent_fallback["response_stats"]["scope"], "recent")
+            self.assertEqual(recent_fallback["response_stats"]["avg_minutes"], 25.0)
+            self.assertEqual(recent_fallback["response_stats"]["recent_durations"], [25])
+            self.assertEqual(recent_fallback["latency_buckets"]["scope"], "recent")
+            self.assertEqual(recent_fallback["latency_buckets"]["m20_30"], 1)
+            self.assertEqual(recent_fallback["latency_buckets"]["within_30m_pct"], 100.0)
+
+            # Open emergency (waiting 85m, created 13:05).
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_hidden_emerg", "msg_type": "text", "msg_id": "le1", "content": "我被锁在图书馆了"},
+                classify_message("text", "我被锁在图书馆了"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 13, 5),
+            )
+
+            # Open todo cases across wait buckets:
+            # - created 12:30 -> 120m (>=60m) - oldest overall!
+            store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_hidden_t1",
+                summary="最久等待工单",
+                latest_message="储物柜异常",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 12, 30),
+            )
+            # - created 13:45 -> 45m (30..60m)
+            store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_hidden_t2",
+                summary="中等等待工单",
+                latest_message="扣费疑问",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 13, 45),
+            )
+            # - created 14:15 -> 15m (<30m)
+            store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_hidden_t3",
+                summary="新近工单",
+                latest_message="借阅证补办",
+                now_epoch=self._epoch_utc8(2026, 11, 28, 14, 15),
+            )
+
+            # Closed cases today covering all 4 latency buckets: 8m, 15m, 25m, 40m
+            # Also one created at 08:10 (extends hourly_pace_today start to 08).
+            closed_specs = [
+                (8, 10, 8, 18, "快速处理"),   # 8m (<=10)
+                (9, 0, 9, 15, "一般处理"),    # 15m (10..20)
+                (10, 0, 10, 25, "中速处理"),  # 25m (20..30)
+                (11, 0, 11, 40, "复杂处理"),  # 40m (>30)
+            ]
+            for idx, (ch, cm, clh, clm, note) in enumerate(closed_specs, start=1):
+                c = store.create_staff_case(
+                    account_id="gh_lib",
+                    reader_id=f"o_hidden_c{idx}",
+                    summary=f"今日结案{idx}",
+                    latest_message=f"内容{idx}",
+                    now_epoch=self._epoch_utc8(2026, 11, 28, ch, cm),
+                )
+                store.close_staff_case(
+                    c.case_id,
+                    resolution_note=note,
+                    now_epoch=self._epoch_utc8(2026, 11, 28, clh, clm),
+                )
+
+            # Feedback record.
+            store.ingest_event(
+                {"to_user": "gh_lib", "from_user": "o_hidden_fb", "msg_type": "text", "msg_id": "lfb1", "content": "建议增加充电口"},
+                classify_message("text", "建议增加充电口"),
+                received_at_epoch=self._epoch_utc8(2026, 11, 28, 14, 0),
+            )
+
+            lib = store.dashboard_librarian_analytics(now_epoch=now_ep)
+            self.assertEqual(lib["open_counts"], {"total": 4, "emergency": 1, "staff_todo": 3})
+            self.assertEqual(
+                lib["wait_buckets"],
+                {"emergency": 1, "over_60m": 1, "m30_60": 1, "under_30m": 1},
+            )
+            # Longest waiting first within open_todo: 120m, 45m, 15m.
+            self.assertEqual([c["wait_minutes"] for c in lib["open_todo"]], [120, 45, 15])
+            self.assertEqual(lib["open_emergency"][0]["wait_minutes"], 85)
+            self.assertEqual(lib["open_emergency"][0]["created_hm"], "13:05")
+            self.assertEqual(
+                lib["open_emergency"][0]["messages"],
+                [{"sender_role": "reader", "content": "我被锁在图书馆了", "created_hm": "13:05"}],
+            )
+            self.assertEqual(
+                lib["longest_wait"],
+                {"minutes": 120, "created_hm": "12:30", "summary": "最久等待工单"},
+            )
+
+            # Today created = 1 emergency + 3 open todo + 4 closed today = 8; closed today = 4 -> 50.0%
+            self.assertEqual(lib["today_stats"], {"created": 8, "closed": 4, "close_rate_pct": 50.0})
+            self.assertEqual(
+                lib["response_stats"],
+                {
+                    "avg_minutes": 22.0,
+                    "recent_durations": [8, 15, 25, 40],
+                    "sample_count": 4,
+                    "scope": "today",
+                },
+            )
+            self.assertEqual(
+                lib["latency_buckets"],
+                {
+                    "le_10m": 1,
+                    "m10_20": 1,
+                    "m20_30": 1,
+                    "gt_30m": 1,
+                    "total": 4,
+                    "within_30m_pct": 75.0,
+                    "scope": "today",
+                },
+            )
+            self.assertEqual(lib["hourly_range_label"], "08–16h")
+            pace_by_hour = {item["hour"]: item for item in lib["hourly_pace_today"]}
+            self.assertEqual((pace_by_hour[8]["created"], pace_by_hour[8]["closed"]), (1, 1))
+            self.assertEqual((pace_by_hour[11]["created"], pace_by_hour[11]["closed"]), (1, 1))
+            self.assertEqual((pace_by_hour[14]["created"], pace_by_hour[14]["closed"]), (1, 0))
+
+            self.assertEqual(len(lib["recent_closed"]), 5)  # 4 today + 1 yesterday
+            self.assertEqual(lib["recent_closed"][0]["summary"], "今日结案4")
+            self.assertEqual(lib["recent_closed"][0]["duration_minutes"], 40)
+            self.assertEqual(lib["recent_closed"][0]["closed_hm"], "11:40")
+            self.assertEqual(len(lib["recent_feedbacks"]), 1)
+            self.assertEqual(lib["recent_feedbacks"][0]["content"], "建议增加充电口")
+            self.assertEqual(lib["recent_feedbacks"][0]["created_at_utc8"], "2026-11-28 14:00")
+
+            # Strict privacy assertion: NO "reader_id" key and NO reader OpenID anywhere in serialized output.
+            serialized = json.dumps(lib, ensure_ascii=False)
+            self.assertNotIn("reader_id", serialized)
+            self.assertNotIn("o_hidden_", serialized)
         finally:
             store.close()
 

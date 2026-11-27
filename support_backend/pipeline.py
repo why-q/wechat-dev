@@ -44,6 +44,7 @@ class SupportPipeline:
         triage_fn: BatchFlushedHook | None = None,
         commit_handler: CommitHandlerHook | None = None,
         on_batch_flushed: BatchFlushedHook | None = None,
+        purge_interval_seconds: float = 3600.0,
     ) -> None:
         self.store = store
         self.send_text_fn = send_text_fn
@@ -57,6 +58,7 @@ class SupportPipeline:
         self.triage_fn = triage_fn
         self.commit_handler = commit_handler
         self.on_batch_flushed = on_batch_flushed
+        self.purge_interval_seconds = float(purge_interval_seconds)
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._wakeup: asyncio.Event | None = None
@@ -64,6 +66,14 @@ class SupportPipeline:
         self._scheduler_task: asyncio.Task[None] | None = None
         self._flush_lock: asyncio.Lock | None = None
         self._active_tasks: dict[int, tuple[int, asyncio.Task[None]]] = {}
+        self._last_purge_epoch: float = 0.0
+
+    async def purge_expired_now(self) -> int:
+        """Purge expired inbound events whose retention deadline has elapsed."""
+        deleted = await asyncio.to_thread(self.store.purge_expired_events)
+        if deleted > 0:
+            _LOGGER.info("Support expired events purged: deleted=%d", deleted)
+        return deleted
 
     async def start(self) -> list[FlushOutcome]:
         """Start background scheduler and recover overdue debounce or interrupted immediate batches."""
@@ -73,6 +83,11 @@ class SupportPipeline:
         self._stop_requested = False
 
         recovered = await self.flush_due_now()
+        try:
+            await self.purge_expired_now()
+        except Exception as exc:
+            _LOGGER.warning("Support startup expiry purge failed: reason=%s", type(exc).__name__)
+        self._last_purge_epoch = self.store.now()
         self._scheduler_task = self._loop.create_task(self._scheduler_loop(), name="support-merge-scheduler")
 
         pending_immediate = await asyncio.to_thread(self.store.recover_immediate_batches)
@@ -311,13 +326,36 @@ class SupportPipeline:
             if self._stop_requested:
                 break
 
+            now_epoch = self.store.now()
+            if (
+                self.purge_interval_seconds > 0
+                and now_epoch - self._last_purge_epoch >= self.purge_interval_seconds
+            ):
+                try:
+                    await self.purge_expired_now()
+                except Exception as exc:
+                    _LOGGER.warning("Support scheduler expiry purge failed: reason=%s", type(exc).__name__)
+                self._last_purge_epoch = self.store.now()
+                now_epoch = self._last_purge_epoch
+
+            if self._stop_requested:
+                break
+
             next_deadline = self.store.next_open_deadline()
-            if next_deadline is None:
+            delay: float | None = None
+            if next_deadline is not None:
+                delay = max(0.0, next_deadline - now_epoch)
+            if self.purge_interval_seconds > 0:
+                next_purge_delay = max(
+                    0.0, (self._last_purge_epoch + self.purge_interval_seconds) - now_epoch
+                )
+                delay = next_purge_delay if delay is None else min(delay, next_purge_delay)
+
+            if delay is None:
                 await self._wakeup.wait()
                 self._wakeup.clear()
                 continue
 
-            delay = max(0.0, next_deadline - self.store.now())
             if delay == 0.0:
                 continue
             try:

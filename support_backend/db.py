@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import os
 from pathlib import Path
 import sqlite3
@@ -31,6 +32,44 @@ DEFAULT_MERGE_ENABLED = False
 DEFAULT_MAX_PREEMPTS = 2
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 3600
 DEFAULT_CLARIFICATION_TTL_SECONDS = 1800.0
+
+_UTC8 = timezone(timedelta(hours=8))
+_WEEKDAY_ZH = ("一", "二", "三", "四", "五", "六", "日")
+_PURGE_CHUNK_SIZE = 500
+_ROUTING_TIER1_PRESET = frozenset({"exact_alias", "decision_preset"})
+_ROUTING_TIER2_RAG = frozenset({"tier2_short", "tier2_long"})
+_ROUTING_CLARIFY = frozenset({"decision_clarify", "tier2_clarify"})
+_ROUTING_STAFF_FALLBACK = frozenset(
+    {
+        "decision_staff",
+        "tier2_staff",
+        "clarify_limit_fallback",
+        "tier2_unavailable_fallback",
+        "tier2_error_fallback",
+        "tier2_fallback",
+        "decision_unknown_fallback",
+        "staff_case_appended",
+    }
+)
+
+
+def _epoch_to_utc8(epoch_seconds: float) -> datetime:
+    return datetime.fromtimestamp(float(epoch_seconds), tz=_UTC8)
+
+
+def _parse_closed_epoch(closed_at_utc: str | None, updated_at_epoch: float) -> float:
+    if isinstance(closed_at_utc, str) and closed_at_utc.strip():
+        raw = closed_at_utc.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            pass
+    return float(updated_at_epoch)
 
 SameCaseMatcher = Callable[[str, dict[str, Any], float], tuple[bool, str]]
 
@@ -1618,4 +1657,624 @@ class SupportStore:
                 "feedback_count": feedback_total,
                 "triage_stages": triage_stages,
                 "outbound_replies": reply_statuses,
+            }
+
+    def purge_expired_events(self, *, now_epoch: float | None = None) -> int:
+        """Delete expired inbound_events not referenced by active merge batches while preserving FK integrity."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            rows = self._conn.execute(
+                """
+                SELECT ie.seq
+                FROM inbound_events AS ie
+                WHERE ie.expires_at_epoch IS NOT NULL
+                  AND ie.expires_at_epoch <= ?
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM batch_messages AS bm
+                      JOIN merge_batches AS mb ON mb.batch_id = bm.batch_id
+                      WHERE bm.event_seq = ie.seq
+                        AND mb.status IN ('open', 'processing', 'queued')
+                  )
+                """,
+                (now_val,),
+            ).fetchall()
+            expired_seqs = [int(row["seq"]) for row in rows]
+            if not expired_seqs:
+                return 0
+
+            deleted_total = 0
+            with self._conn:
+                for start in range(0, len(expired_seqs), _PURGE_CHUNK_SIZE):
+                    chunk = expired_seqs[start : start + _PURGE_CHUNK_SIZE]
+                    placeholders = ",".join("?" for _ in chunk)
+                    self._conn.execute(
+                        f"DELETE FROM batch_messages WHERE event_seq IN ({placeholders})",
+                        chunk,
+                    )
+                    self._conn.execute(
+                        f"UPDATE staff_case_messages SET event_seq = NULL WHERE event_seq IN ({placeholders})",
+                        chunk,
+                    )
+                    cursor = self._conn.execute(
+                        f"DELETE FROM inbound_events WHERE seq IN ({placeholders})",
+                        chunk,
+                    )
+                    deleted_total += int(cursor.rowcount)
+            return deleted_total
+
+    def dashboard_admin_analytics(self, *, now_epoch: float | None = None) -> dict[str, Any]:
+        """Return UTC+8 operational analytics for the admin dashboard without exposing reader content or OpenIDs."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_dt = _epoch_to_utc8(now_val)
+            today_start_dt = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_epoch = today_start_dt.timestamp()
+            tomorrow_start_epoch = (today_start_dt + timedelta(days=1)).timestamp()
+
+            day_dts = [today_start_dt - timedelta(days=offset) for offset in range(6, -1, -1)]
+            day0_dt = day_dts[0]
+            day0_epoch = day0_dt.timestamp()
+            prior_7d_start_epoch = (day0_dt - timedelta(days=7)).timestamp()
+
+            day_counts: dict[str, int] = {dt.strftime("%Y-%m-%d"): 0 for dt in day_dts}
+            hour_counts: dict[int, int] = {}
+            filter_counts: dict[str, int] = {
+                "question": 0,
+                "feedback": 0,
+                "invalid": 0,
+                "unsupported": 0,
+                "emergency": 0,
+                "gray_enroll": 0,
+            }
+            total_non_gray = 0
+
+            inbound_7d_rows = self._conn.execute(
+                """
+                SELECT received_at_epoch, filter_category
+                FROM inbound_events
+                WHERE received_at_epoch >= ? AND received_at_epoch < ?
+                """,
+                (day0_epoch, tomorrow_start_epoch),
+            ).fetchall()
+            for row in inbound_7d_rows:
+                rec_epoch = float(row["received_at_epoch"])
+                rec_dt = _epoch_to_utc8(rec_epoch)
+                day_key = rec_dt.strftime("%Y-%m-%d")
+                if day_key in day_counts:
+                    day_counts[day_key] += 1
+                if today_start_epoch <= rec_epoch < tomorrow_start_epoch:
+                    hour_counts[rec_dt.hour] = hour_counts.get(rec_dt.hour, 0) + 1
+                cat = str(row["filter_category"])
+                if cat in filter_counts:
+                    filter_counts[cat] += 1
+                if cat != "gray_enroll":
+                    total_non_gray += 1
+
+            daily_inbound = [
+                {
+                    "date": dt.strftime("%Y-%m-%d"),
+                    "label": f"{dt.day:02d}{_WEEKDAY_ZH[dt.weekday()]}",
+                    "count": day_counts[dt.strftime("%Y-%m-%d")],
+                }
+                for dt in day_dts
+            ]
+            inbound_7d_total = sum(item["count"] for item in daily_inbound)
+            inbound_7d_avg = round(inbound_7d_total / 7.0, 1)
+            inbound_today_total = daily_inbound[-1]["count"]
+            inbound_all_total = int(
+                self._conn.execute("SELECT COUNT(*) FROM inbound_events").fetchone()[0]
+            )
+
+            prior_7d_total = int(
+                self._conn.execute(
+                    """
+                    SELECT COUNT(*) FROM inbound_events
+                    WHERE received_at_epoch >= ? AND received_at_epoch < ?
+                    """,
+                    (prior_7d_start_epoch, day0_epoch),
+                ).fetchone()[0]
+            )
+            inbound_delta_pct = (
+                round((inbound_7d_total - prior_7d_total) / prior_7d_total * 100.0, 1)
+                if prior_7d_total > 0
+                else None
+            )
+
+            active_hours = [h for h, cnt in hour_counts.items() if cnt > 0]
+            cur_hour = now_dt.hour
+            start_h = min(8, min(active_hours)) if active_hours else 8
+            end_h = max(16, cur_hour, max(active_hours)) if active_hours else max(16, cur_hour)
+            start_h = max(0, min(23, start_h))
+            end_h = max(start_h, min(23, end_h))
+            hourly_inbound_today = [
+                {"hour": h, "label": f"{h:02d}", "count": hour_counts.get(h, 0)}
+                for h in range(start_h, end_h + 1)
+            ]
+            hourly_range_label = f"{start_h:02d}–{end_h:02d}h"
+
+            replies_today = {"sent": 0, "shadow": 0, "failed": 0, "total": 0}
+            for row in self._conn.execute(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM outbound_replies
+                WHERE created_at_epoch >= ? AND created_at_epoch < ?
+                GROUP BY status
+                """,
+                (today_start_epoch, tomorrow_start_epoch),
+            ).fetchall():
+                cnt = int(row["cnt"])
+                status = str(row["status"])
+                replies_today["total"] += cnt
+                if status in ("sent", "shadow", "failed"):
+                    replies_today[status] += cnt
+
+            replies_all = {"sent": 0, "shadow": 0, "failed": 0, "total": 0}
+            for row in self._conn.execute(
+                "SELECT status, COUNT(*) AS cnt FROM outbound_replies GROUP BY status"
+            ).fetchall():
+                cnt = int(row["cnt"])
+                status = str(row["status"])
+                replies_all["total"] += cnt
+                if status in ("sent", "shadow", "failed"):
+                    replies_all[status] += cnt
+
+            filter_7d = {**filter_counts, "total_non_gray": total_non_gray}
+
+            routing_7d: dict[str, Any] = {
+                "tier1_preset": 0,
+                "tier2_rag": 0,
+                "clarify": 0,
+                "staff_fallback": 0,
+                "other": 0,
+            }
+            for row in self._conn.execute(
+                """
+                SELECT stage_path, COUNT(*) AS cnt
+                FROM triage_runs
+                WHERE created_at_epoch >= ? AND created_at_epoch < ?
+                GROUP BY stage_path
+                """,
+                (day0_epoch, tomorrow_start_epoch),
+            ).fetchall():
+                stage_path = str(row["stage_path"])
+                cnt = int(row["cnt"])
+                if stage_path in _ROUTING_TIER1_PRESET:
+                    routing_7d["tier1_preset"] += cnt
+                elif stage_path in _ROUTING_TIER2_RAG:
+                    routing_7d["tier2_rag"] += cnt
+                elif stage_path in _ROUTING_CLARIFY:
+                    routing_7d["clarify"] += cnt
+                elif stage_path in _ROUTING_STAFF_FALLBACK:
+                    routing_7d["staff_fallback"] += cnt
+                else:
+                    routing_7d["other"] += cnt
+            routing_total = (
+                routing_7d["tier1_preset"]
+                + routing_7d["tier2_rag"]
+                + routing_7d["clarify"]
+                + routing_7d["staff_fallback"]
+                + routing_7d["other"]
+            )
+            routing_7d["total"] = routing_total
+            routing_7d["auto_rate_pct"] = (
+                round((routing_total - routing_7d["staff_fallback"]) / routing_total * 100.0, 1)
+                if routing_total > 0
+                else None
+            )
+
+            batch_counts = {"open": 0, "processing": 0, "queued": 0, "flushed": 0}
+            for row in self._conn.execute(
+                "SELECT status, COUNT(*) AS cnt FROM merge_batches GROUP BY status"
+            ).fetchall():
+                status = str(row["status"])
+                if status in batch_counts:
+                    batch_counts[status] = int(row["cnt"])
+            batches = {
+                **batch_counts,
+                "active_total": (
+                    batch_counts["open"] + batch_counts["processing"] + batch_counts["queued"]
+                ),
+            }
+
+            open_emergency_count = 0
+            open_todo_count = 0
+            for row in self._conn.execute(
+                """
+                SELECT case_kind, COUNT(*) AS cnt
+                FROM staff_cases
+                WHERE status = 'open'
+                GROUP BY case_kind
+                """
+            ).fetchall():
+                if str(row["case_kind"]) == "emergency":
+                    open_emergency_count += int(row["cnt"])
+                else:
+                    open_todo_count += int(row["cnt"])
+            open_cases = {
+                "total": open_emergency_count + open_todo_count,
+                "emergency": open_emergency_count,
+                "staff_todo": open_todo_count,
+            }
+
+            alert_candidates: list[tuple[float, int, dict[str, str]]] = []
+            for row in self._conn.execute(
+                """
+                SELECT reply_id, errcode, created_at_epoch, created_at_utc
+                FROM outbound_replies
+                WHERE status = 'failed'
+                ORDER BY created_at_epoch DESC, reply_id DESC
+                LIMIT 5
+                """
+            ).fetchall():
+                ep = float(row["created_at_epoch"])
+                errcode = row["errcode"]
+                err_suffix = f" ({int(errcode)})" if errcode else ""
+                alert_candidates.append(
+                    (
+                        ep,
+                        int(row["reply_id"]),
+                        {
+                            "time_hm": _epoch_to_utc8(ep).strftime("%H:%M"),
+                            "time_iso": str(row["created_at_utc"]),
+                            "kind": "reply_failed",
+                            "badge": "发信失败",
+                            "severity": "urgent",
+                            "text": f"微信客服接口请求失败{err_suffix}",
+                        },
+                    )
+                )
+            for row in self._conn.execute(
+                """
+                SELECT case_id, created_at_epoch, created_at_utc
+                FROM staff_cases
+                WHERE case_kind = 'emergency'
+                ORDER BY created_at_epoch DESC, case_id DESC
+                LIMIT 5
+                """
+            ).fetchall():
+                ep = float(row["created_at_epoch"])
+                alert_candidates.append(
+                    (
+                        ep,
+                        int(row["case_id"]),
+                        {
+                            "time_hm": _epoch_to_utc8(ep).strftime("%H:%M"),
+                            "time_iso": str(row["created_at_utc"]),
+                            "kind": "emergency",
+                            "badge": "紧急事件",
+                            "severity": "urgent",
+                            "text": "收到紧急情况登记，已回复联系方式",
+                        },
+                    )
+                )
+            for row in self._conn.execute(
+                """
+                SELECT run_id, created_at_epoch, created_at_utc
+                FROM triage_runs
+                WHERE staff_case_id IS NOT NULL
+                ORDER BY created_at_epoch DESC, run_id DESC
+                LIMIT 5
+                """
+            ).fetchall():
+                ep = float(row["created_at_epoch"])
+                alert_candidates.append(
+                    (
+                        ep,
+                        int(row["run_id"]),
+                        {
+                            "time_hm": _epoch_to_utc8(ep).strftime("%H:%M"),
+                            "time_iso": str(row["created_at_utc"]),
+                            "kind": "staff_fallback",
+                            "badge": "馆员兜底",
+                            "severity": "muted",
+                            "text": "自动问答转人工待办处理",
+                        },
+                    )
+                )
+            alert_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+            recent_alerts = [item[2] for item in alert_candidates[:5]]
+
+            return {
+                "snapshot_at_utc8": now_dt.strftime("%Y-%m-%d %H:%M"),
+                "snapshot_hm": now_dt.strftime("%H:%M"),
+                "date_range_label": f"{day_dts[0].month:02d}/{day_dts[0].day:02d}–{day_dts[-1].month:02d}/{day_dts[-1].day:02d}",
+                "daily_inbound": daily_inbound,
+                "inbound_7d_total": inbound_7d_total,
+                "inbound_7d_avg": inbound_7d_avg,
+                "inbound_today_total": inbound_today_total,
+                "inbound_all_total": inbound_all_total,
+                "inbound_delta_pct": inbound_delta_pct,
+                "hourly_inbound_today": hourly_inbound_today,
+                "hourly_range_label": hourly_range_label,
+                "replies_today": replies_today,
+                "replies_all": replies_all,
+                "filter_7d": filter_7d,
+                "routing_7d": routing_7d,
+                "batches": batches,
+                "open_cases": open_cases,
+                "recent_alerts": recent_alerts,
+            }
+
+    def dashboard_librarian_analytics(self, *, now_epoch: float | None = None) -> dict[str, Any]:
+        """Return UTC+8 librarian queue, latency, and feedback analytics without ever exposing reader_id."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_dt = _epoch_to_utc8(now_val)
+            today_start_dt = now_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_epoch = today_start_dt.timestamp()
+            tomorrow_start_epoch = (today_start_dt + timedelta(days=1)).timestamp()
+
+            open_emerg_rows = self._conn.execute(
+                """
+                SELECT case_id, case_kind, summary, latest_message, created_at_epoch
+                FROM staff_cases
+                WHERE status = 'open' AND case_kind = 'emergency'
+                ORDER BY created_at_epoch ASC, case_id ASC
+                LIMIT 100
+                """
+            ).fetchall()
+            open_todo_rows = self._conn.execute(
+                """
+                SELECT case_id, case_kind, summary, latest_message, created_at_epoch
+                FROM staff_cases
+                WHERE status = 'open' AND case_kind <> 'emergency'
+                ORDER BY created_at_epoch ASC, case_id ASC
+                LIMIT 100
+                """
+            ).fetchall()
+
+            open_case_ids = [int(r["case_id"]) for r in open_emerg_rows] + [
+                int(r["case_id"]) for r in open_todo_rows
+            ]
+            messages_by_case: dict[int, list[dict[str, str]]] = {cid: [] for cid in open_case_ids}
+            if open_case_ids:
+                placeholders = ",".join("?" for _ in open_case_ids)
+                msg_rows = self._conn.execute(
+                    f"""
+                    SELECT case_id, sender_role, content, created_at_epoch
+                    FROM staff_case_messages
+                    WHERE case_id IN ({placeholders})
+                    ORDER BY item_id ASC
+                    """,
+                    open_case_ids,
+                ).fetchall()
+                for mrow in msg_rows:
+                    cid = int(mrow["case_id"])
+                    if cid in messages_by_case:
+                        messages_by_case[cid].append(
+                            {
+                                "sender_role": str(mrow["sender_role"]),
+                                "content": str(mrow["content"]),
+                                "created_hm": _epoch_to_utc8(float(mrow["created_at_epoch"])).strftime(
+                                    "%H:%M"
+                                ),
+                            }
+                        )
+
+            def _build_open_case(row: sqlite3.Row) -> dict[str, Any]:
+                cid = int(row["case_id"])
+                created_epoch = float(row["created_at_epoch"])
+                created_dt = _epoch_to_utc8(created_epoch)
+                wait_minutes = max(0, int((now_val - created_epoch) // 60))
+                return {
+                    "case_id": cid,
+                    "case_kind": str(row["case_kind"]),
+                    "summary": str(row["summary"]),
+                    "latest_message": str(row["latest_message"]),
+                    "created_at_utc8": created_dt.strftime("%Y-%m-%d %H:%M"),
+                    "created_hm": created_dt.strftime("%H:%M"),
+                    "wait_minutes": wait_minutes,
+                    "messages": messages_by_case.get(cid, []),
+                }
+
+            open_emergency = [_build_open_case(r) for r in open_emerg_rows]
+            open_todo = [_build_open_case(r) for r in open_todo_rows]
+
+            open_counts = {
+                "total": len(open_emergency) + len(open_todo),
+                "emergency": len(open_emergency),
+                "staff_todo": len(open_todo),
+            }
+            wait_buckets = {
+                "emergency": len(open_emergency),
+                "over_60m": sum(1 for item in open_todo if item["wait_minutes"] >= 60),
+                "m30_60": sum(1 for item in open_todo if 30 <= item["wait_minutes"] < 60),
+                "under_30m": sum(1 for item in open_todo if item["wait_minutes"] < 30),
+            }
+
+            oldest_candidates: list[tuple[float, int, dict[str, Any]]] = []
+            if open_emerg_rows:
+                oldest_candidates.append(
+                    (
+                        float(open_emerg_rows[0]["created_at_epoch"]),
+                        int(open_emerg_rows[0]["case_id"]),
+                        open_emergency[0],
+                    )
+                )
+            if open_todo_rows:
+                oldest_candidates.append(
+                    (
+                        float(open_todo_rows[0]["created_at_epoch"]),
+                        int(open_todo_rows[0]["case_id"]),
+                        open_todo[0],
+                    )
+                )
+            if oldest_candidates:
+                oldest_candidates.sort(key=lambda item: (item[0], item[1]))
+                oldest_item = oldest_candidates[0][2]
+                longest_wait = {
+                    "minutes": oldest_item["wait_minutes"],
+                    "created_hm": oldest_item["created_hm"],
+                    "summary": oldest_item["summary"],
+                }
+            else:
+                longest_wait = {"minutes": 0, "created_hm": "", "summary": ""}
+
+            created_by_hour = [0] * 24
+            closed_by_hour = [0] * 24
+            created_today_rows = self._conn.execute(
+                """
+                SELECT created_at_epoch
+                FROM staff_cases
+                WHERE created_at_epoch >= ? AND created_at_epoch < ?
+                """,
+                (today_start_epoch, tomorrow_start_epoch),
+            ).fetchall()
+            created_today_count = len(created_today_rows)
+            for row in created_today_rows:
+                created_by_hour[_epoch_to_utc8(float(row["created_at_epoch"])).hour] += 1
+
+            all_closed_rows = self._conn.execute(
+                """
+                SELECT case_id, case_kind, summary, created_at_epoch, updated_at_epoch,
+                       closed_at_utc, resolution_note
+                FROM staff_cases
+                WHERE status = 'closed'
+                ORDER BY updated_at_epoch DESC, case_id DESC
+                """
+            ).fetchall()
+
+            closed_today_samples: list[tuple[float, int, int]] = []
+            for row in all_closed_rows:
+                closed_epoch = _parse_closed_epoch(row["closed_at_utc"], float(row["updated_at_epoch"]))
+                if today_start_epoch <= closed_epoch < tomorrow_start_epoch:
+                    closed_dt = _epoch_to_utc8(closed_epoch)
+                    closed_by_hour[closed_dt.hour] += 1
+                    duration_min = max(
+                        0, int(round((closed_epoch - float(row["created_at_epoch"])) / 60.0))
+                    )
+                    closed_today_samples.append((closed_epoch, int(row["case_id"]), duration_min))
+
+            closed_today_count = len(closed_today_samples)
+            today_stats = {
+                "created": created_today_count,
+                "closed": closed_today_count,
+                "close_rate_pct": (
+                    round(closed_today_count / created_today_count * 100.0, 1)
+                    if created_today_count > 0
+                    else None
+                ),
+            }
+
+            if closed_today_samples:
+                sample_scope = "today"
+                closed_today_samples.sort(key=lambda item: (item[0], item[1]))
+                sample_durations = [item[2] for item in closed_today_samples]
+            else:
+                sample_scope = "recent"
+                recent_20: list[tuple[float, int, int]] = []
+                for row in all_closed_rows[:20]:
+                    closed_epoch = _parse_closed_epoch(
+                        row["closed_at_utc"], float(row["updated_at_epoch"])
+                    )
+                    duration_min = max(
+                        0, int(round((closed_epoch - float(row["created_at_epoch"])) / 60.0))
+                    )
+                    recent_20.append((closed_epoch, int(row["case_id"]), duration_min))
+                recent_20.sort(key=lambda item: (item[0], item[1]))
+                sample_durations = [item[2] for item in recent_20]
+
+            response_stats = {
+                "avg_minutes": (
+                    round(sum(sample_durations) / len(sample_durations), 1)
+                    if sample_durations
+                    else None
+                ),
+                "recent_durations": sample_durations[-6:],
+                "sample_count": len(sample_durations),
+                "scope": sample_scope,
+            }
+
+            le_10m = sum(1 for d in sample_durations if d <= 10)
+            m10_20 = sum(1 for d in sample_durations if 10 < d <= 20)
+            m20_30 = sum(1 for d in sample_durations if 20 < d <= 30)
+            gt_30m = sum(1 for d in sample_durations if d > 30)
+            latency_total = len(sample_durations)
+            latency_buckets = {
+                "le_10m": le_10m,
+                "m10_20": m10_20,
+                "m20_30": m20_30,
+                "gt_30m": gt_30m,
+                "total": latency_total,
+                "within_30m_pct": (
+                    round((le_10m + m10_20 + m20_30) / latency_total * 100.0, 1)
+                    if latency_total > 0
+                    else None
+                ),
+                "scope": sample_scope,
+            }
+
+            active_hours = [
+                h for h in range(24) if created_by_hour[h] > 0 or closed_by_hour[h] > 0
+            ]
+            start_h = min(9, min(active_hours)) if active_hours else 9
+            end_h = max(16, now_dt.hour, max(active_hours)) if active_hours else max(16, now_dt.hour)
+            start_h = max(0, min(23, start_h))
+            end_h = max(start_h, min(23, end_h))
+            hourly_pace_today = [
+                {
+                    "hour": h,
+                    "label": f"{h:02d}:00",
+                    "created": created_by_hour[h],
+                    "closed": closed_by_hour[h],
+                }
+                for h in range(start_h, end_h + 1)
+            ]
+            hourly_range_label = f"{start_h:02d}–{end_h:02d}h"
+
+            recent_closed = []
+            for row in all_closed_rows[:15]:
+                closed_epoch = _parse_closed_epoch(row["closed_at_utc"], float(row["updated_at_epoch"]))
+                closed_dt = _epoch_to_utc8(closed_epoch)
+                duration_min = max(
+                    0, int(round((closed_epoch - float(row["created_at_epoch"])) / 60.0))
+                )
+                recent_closed.append(
+                    {
+                        "case_id": int(row["case_id"]),
+                        "case_kind": str(row["case_kind"]),
+                        "summary": str(row["summary"]),
+                        "closed_at_utc8": closed_dt.strftime("%Y-%m-%d %H:%M"),
+                        "closed_hm": closed_dt.strftime("%H:%M"),
+                        "resolution_note": str(row["resolution_note"]),
+                        "duration_minutes": duration_min,
+                    }
+                )
+
+            feedback_rows = self._conn.execute(
+                """
+                SELECT feedback_id, created_at_epoch, content, status, staff_note
+                FROM feedback_records
+                ORDER BY feedback_id DESC
+                LIMIT 20
+                """
+            ).fetchall()
+            recent_feedbacks = [
+                {
+                    "feedback_id": int(row["feedback_id"]),
+                    "created_at_utc8": _epoch_to_utc8(float(row["created_at_epoch"])).strftime(
+                        "%Y-%m-%d %H:%M"
+                    ),
+                    "content": str(row["content"]),
+                    "status": str(row["status"]),
+                    "staff_note": str(row["staff_note"]),
+                }
+                for row in feedback_rows
+            ]
+
+            return {
+                "snapshot_at_utc8": now_dt.strftime("%Y-%m-%d %H:%M"),
+                "open_emergency": open_emergency,
+                "open_todo": open_todo,
+                "open_counts": open_counts,
+                "wait_buckets": wait_buckets,
+                "longest_wait": longest_wait,
+                "today_stats": today_stats,
+                "response_stats": response_stats,
+                "latency_buckets": latency_buckets,
+                "hourly_pace_today": hourly_pace_today,
+                "hourly_range_label": hourly_range_label,
+                "recent_closed": recent_closed,
+                "recent_feedbacks": recent_feedbacks,
             }
