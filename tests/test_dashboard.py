@@ -146,7 +146,7 @@ class DashboardRouteTests(unittest.TestCase):
             headers=self._request_headers("librarian", "librarian-test-password"),
         )
         self.assertEqual(librarian.status_code, 200)
-        self.assertIn("Reader 50 &lt;script&gt;alert(1)&lt;/script>", librarian.text)
+        self.assertIn("Reader 50 &lt;script&gt;alert(1)&lt;/script&gt;", librarian.text)
         self.assertNotIn("<script>alert(1)</script>", librarian.text)
         self.assertEqual(librarian.text.count('class="case-state">未结案'), 50)
         self.assertNotIn('href="/dashboard/admin"', librarian.text)
