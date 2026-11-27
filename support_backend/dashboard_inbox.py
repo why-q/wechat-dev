@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 
 from .db import SupportStore
@@ -26,7 +26,8 @@ def render_inbox(store: SupportStore, *, before: int | None = None) -> str:
     has_older = len(rows) > PAGE_SIZE
     page = rows[:PAGE_SIZE]
     if not page:
-        return '<section class="panel queue-panel"><h1>私信按未结案展示</h1><p>当前没有保留中的读者私信。</p></section>'
+        latest = '<nav aria-label="私信分页"><a href="/dashboard/librarian">返回最新</a></nav>' if before is not None else ""
+        return f'<section class="panel queue-panel"><h1>私信按未结案展示</h1><p>当前没有保留中的读者私信。</p>{latest}</section>'
 
     items: list[str] = []
     for row in page:
@@ -37,23 +38,28 @@ def render_inbox(store: SupportStore, *, before: int | None = None) -> str:
         if category == "gray_enroll":
             label = "灰度入组消息"
             content = "灰度入组消息，内容不展示"
+        elif category == "emergency":
+            label = f"紧急消息，{label}"
+            if not content:
+                content = f"[{label}]"
         elif not content:
             content = f"[{label}]"
         stamp = datetime.fromisoformat(str(row["received_at_utc"]).replace("Z", "+00:00"))
         if stamp.tzinfo is None:
             stamp = stamp.replace(tzinfo=timezone.utc)
-        timestamp = stamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        shanghai = timezone(timedelta(hours=8))
+        timestamp = stamp.astimezone(shanghai).strftime("%Y-%m-%d %H:%M UTC+8")
         items.append(
             '<li class="case-row"><div class="case-main">'
-            f'<h2>{escape(str(row["reader_id"]))}</h2>'
-            f'<p class="case-meta"><span>{escape(timestamp)}</span><span>{escape(label)}</span></p>'
+            f'<h2>{escape(label)}</h2>'
+            f'<p class="case-meta"><span>{escape(timestamp)}</span></p>'
             f'<p class="thread">{escape(content)}</p></div>'
             '<span class="case-state">未结案</span></li>'
         )
 
-    paging = ""
+    paging = '<nav aria-label="私信分页"><a href="/dashboard/librarian">返回最新</a></nav>' if before is not None else ""
     if has_older:
-        paging = f'<nav aria-label="私信分页"><a href="?before={int(page[-1]["seq"])}">更早私信</a></nav>'
+        paging = f'<nav aria-label="私信分页"><a href="?before={int(page[-1]["seq"])}">更早私信</a> <a href="/dashboard/librarian">返回最新</a></nav>'
     return (
         '<section class="panel queue-panel"><h1>私信按未结案展示</h1>'
         '<p>所有保留中的读者私信均按未结案显示，仅供查看。</p>'

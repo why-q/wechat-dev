@@ -16,11 +16,12 @@ class InboxProjectionTests(unittest.TestCase):
             store = SupportStore(Path(temp) / "inbox.db", clock=lambda: now[0])
             try:
                 seqs = []
+                private_id = "o_private_<unique>&"
                 for index in range(52):
                     content = "<reader> & private"
                     payload = {
                         "transport": "cloud", "msg_type": "text", "event": "",
-                        "msg_id": str(index), "from_user": "reader", "to_user": "library",
+                        "msg_id": str(index), "from_user": private_id, "to_user": "library",
                         "content": content, "create_time": "1800000000",
                     }
                     result = store.ingest_event(payload, classify_message(msg_type="text", content=content), client_ip="")
@@ -32,11 +33,12 @@ class InboxProjectionTests(unittest.TestCase):
                 first = render_inbox(store)
                 self.assertEqual(first.count('class="case-state"'), 50)
                 self.assertIn("更早私信", first)
-                self.assertIn("&lt;reader&gt; &amp; private", first)
-                self.assertNotIn("synthetic", first)
+                self.assertNotIn(private_id, first)
+                self.assertNotIn("o_private_&lt;unique&gt;&amp;", first)
                 older = render_inbox(store, before=seqs[2])
                 self.assertEqual(older.count('class="case-state"'), 2)
                 self.assertNotIn("更早私信", older)
+                self.assertIn("返回最新", older)
                 now[0] += 8 * 24 * 3600
                 self.assertIn("当前没有保留中的读者私信", render_inbox(store))
             finally:

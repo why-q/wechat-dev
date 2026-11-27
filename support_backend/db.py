@@ -1300,7 +1300,7 @@ class SupportStore:
             params.append(bounded)
             rows = self._conn.execute(
                 f"""
-                SELECT seq, received_at_utc, reader_id, msg_type, content, filter_category
+                SELECT seq, received_at_utc, msg_type, content, filter_category
                 FROM inbound_events
                 WHERE {' AND '.join(clauses)}
                 ORDER BY seq DESC
