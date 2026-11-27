@@ -400,7 +400,9 @@ class SupportPipeline:
         shadow_reason: str | None = None
         if not self.auto_reply_enabled or self.send_text_fn is None:
             shadow_reason = "disabled"
-        elif self.auto_reply_allowlist and reader_id not in self.auto_reply_allowlist:
+        elif (
+            self.auto_reply_allowlist or self.gray_enroll_keyword
+        ) and reader_id not in self.auto_reply_allowlist:
             in_dynamic = await asyncio.to_thread(
                 self.store.is_allowlisted, account_id, reader_id
             )

@@ -1073,9 +1073,97 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
                     self.assertEqual(code3, 200)
                     await relay_receiver.app.state.support_pipeline.wait_for_idle(timeout=2.0)
 
+                    # Re-enroll and verify clear removes all entries.
+                    await _async_asgi_request(
+                        relay_receiver.app,
+                        "POST",
+                        "/relay/wechat",
+                        body=json.dumps(
+                            {
+                                "msg_type": "text",
+                                "msg_id": "h4",
+                                "from_user": "o_tester_new",
+                                "to_user": "gh_lib",
+                                "content": test_kw,
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8"),
+                        headers=auth,
+                    )
+                    await relay_receiver.app.state.support_pipeline.wait_for_idle(timeout=2.0)
+                    clr_code, clr_text = await _async_asgi_request(
+                        relay_receiver.app, "POST", "/relay/support/allowlist/clear", body=b"", headers=auth
+                    )
+                    self.assertEqual(clr_code, 200)
+                    self.assertEqual(json.loads(clr_text), {"removed": 1})
+
         asyncio.run(run_http())
-        self.assertEqual(len(sent_calls), 2)
+        self.assertEqual(len(sent_calls), 3)
         self.assertEqual(sent_calls[0][1], GRAY_ENROLL_ADDED_REPLY)
+
+    def test_empty_static_allowlist_still_gates_when_gray_enroll_keyword_set(self):
+        sent_calls: list[tuple[str, str]] = []
+        test_kw = "test-empty-static-passphrase"
+
+        def fake_send(to_user: str, content: str) -> dict[str, object]:
+            sent_calls.append((to_user, content))
+            return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 5, "mode": "direct_https"}
+
+        catalog = PresetCatalog.from_corpus_dir(Path("rag-poc/corpus"))
+        store = SupportStore(self.db_path, merge_enabled=False)
+        try:
+            responder = SupportResponder(store=store, preset_catalog=catalog)
+            pipeline = SupportPipeline(
+                store,
+                send_text_fn=fake_send,
+                auto_reply_enabled=True,
+                auto_reply_allowlist=[],
+                gray_enroll_keyword=test_kw,
+                triage_fn=responder.triage,
+            )
+            pipeline.commit_handler = lambda outcome, plan: responder.apply_committed_plan(
+                outcome, plan, deliver_reply_fn=pipeline.deliver_reply
+            )
+
+            async def run():
+                await pipeline.start()
+                try:
+                    for mid, reader, content in [
+                        ("e1", "o_user_1", "开馆时间？"),
+                        ("e2", "o_stranger", "开馆时间？"),
+                    ]:
+                        p = {"to_user": "gh_lib", "from_user": reader, "msg_type": "text", "msg_id": mid, "content": content}
+                        res = pipeline.ingest_sync(p)
+                        await pipeline.process_ingest_side_effects(res, p)
+                    await pipeline.wait_for_idle(timeout=2.0)
+                    self.assertEqual(sent_calls, [])
+
+                    for mid, reader, content in [
+                        ("e3", "o_user_1", test_kw),
+                        ("e4", "o_user_1", "开馆时间？"),
+                        ("e5", "o_stranger", "开馆时间？"),
+                    ]:
+                        p = {"to_user": "gh_lib", "from_user": reader, "msg_type": "text", "msg_id": mid, "content": content}
+                        res = pipeline.ingest_sync(p)
+                        await pipeline.process_ingest_side_effects(res, p)
+                    await pipeline.wait_for_idle(timeout=2.0)
+                finally:
+                    await pipeline.stop()
+
+            asyncio.run(run())
+            self.assertEqual(
+                sent_calls,
+                [
+                    ("o_user_1", GRAY_ENROLL_ADDED_REPLY),
+                    ("o_user_1", catalog.get_by_id("preset_opening_hours").body),
+                ],
+            )
+            replies = store.list_outbound_replies(limit=10)
+            shadow_readers = [r["reader_id"] for r in replies if r["status"] == "shadow"]
+            self.assertEqual(shadow_readers.count("o_stranger"), 2)
+            self.assertEqual(shadow_readers.count("o_user_1"), 1)
+        finally:
+            store.close()
 
 
 if __name__ == "__main__":

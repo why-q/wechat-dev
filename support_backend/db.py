@@ -529,6 +529,13 @@ class SupportStore:
                     )
                 return int(cursor.rowcount)
 
+    def clear_allowlist(self) -> int:
+        """Remove all readers from the dynamic allowlist and return deleted row count."""
+        with self._lock:
+            with self._conn:
+                cursor = self._conn.execute("DELETE FROM auto_reply_allowlist")
+                return int(cursor.rowcount)
+
     def _append_batch_message_locked(
         self,
         *,

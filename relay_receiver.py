@@ -700,6 +700,13 @@ async def remove_support_allowlist(request: Request) -> JSONResponse:
     return JSONResponse({"removed": removed}, headers=_HEADERS)
 
 
+@app.post("/relay/support/allowlist/clear", response_class=JSONResponse)
+async def clear_support_allowlist(request: Request) -> JSONResponse:
+    pipeline = _require_authed_pipeline(request)
+    removed = pipeline.store.clear_allowlist()
+    return JSONResponse({"removed": removed}, headers=_HEADERS)
+
+
 @app.get("/relay/support/events", response_class=JSONResponse)
 async def list_support_events(
     request: Request,

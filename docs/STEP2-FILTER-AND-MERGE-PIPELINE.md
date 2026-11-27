@@ -54,7 +54,7 @@
    - **提交屏障**：仅当 `commit_batch_generation` 原子核对 `status='processing' AND generation=expected` 通过后才闭合批次并落库/发信，过期代次静默丢弃；达上限后置 `preempt_locked=1` 锁定当前批次完成答复，后续消息自动写入 `queued` 批次排队接力。
 2. **`SUPPORT_MERGE_ENABLED=true`（防抖合并模式，可选回退）**：
    - 首条 `question` 创建 `open` 批次（`flush_at = min(now + 3s, first + 10s)`）；截止前收到新文本重置 `3` 秒静默计时但不延长 `10` 秒上限，由单周期 `asyncio` 调度器统一到期冲刷。
-- **出站发信与灰度**：代码中 `SUPPORT_AUTO_REPLY_ENABLED` 默认 `false`（写 `status='shadow'`）。当前生产环境 `/etc/wechat-relay.env` 已启用 `SUPPORT_AUTO_REPLY_ENABLED=true` 并通过 `SUPPORT_AUTO_REPLY_ALLOWLIST` 限定仅白名单（含静态白名单与通过 `SUPPORT_GRAY_ENROLL_KEYWORD` 动态加入的 `auto_reply_allowlist` 记录）真实调用 `custom/send`，其余读者全流程记录 `shadow`。
+- **出站发信与灰度**：代码中 `SUPPORT_AUTO_REPLY_ENABLED` 默认 `false`（写 `status='shadow'`）。当前生产环境 `/etc/wechat-relay.env` 已启用 `SUPPORT_AUTO_REPLY_ENABLED=true`，当 `SUPPORT_AUTO_REPLY_ALLOWLIST` 或 `SUPPORT_GRAY_ENROLL_KEYWORD` 任一非空时即启用白名单门控（即使静态白名单清空，未发送密语的读者仍保持 `shadow`），仅白名单（含静态白名单与通过 `SUPPORT_GRAY_ENROLL_KEYWORD` 动态加入的 `auto_reply_allowlist` 记录）真实调用 `custom/send`。
 
 ---
 
@@ -63,5 +63,5 @@
 - `POST /relay/wechat`：校验 `wx_headers`、同步落盘 JSONL 与 SQLite，并异步调度 Filter/问答回复（返回 `{ok, accepted, duplicate, seq}`）。
 - `GET /relay/support/overview`：返回分类计数、活跃批次与各表统计（脱敏，不含 OpenID 与原文）。
 - `GET /relay/support/events`、`batches`、`feedbacks`、`cases`、`replies`、`allowlist`：按 `limit=1..200` 及可选 `category` / `status` 检索结构化状态（Step 3 另增 `triage-runs` 与 `presets`）。
-- `POST /relay/support/cases`、`POST /relay/support/cases/{case_id}/close`、`POST /relay/support/allowlist/remove`：手工创建/结案馆员待办或移出动态灰度白名单。
+- `POST /relay/support/cases`、`POST /relay/support/cases/{case_id}/close`、`POST /relay/support/allowlist/remove`、`POST /relay/support/allowlist/clear`：手工创建/结案馆员待办，或移出/清空动态灰度白名单。
 - `POST /relay/support/flush-due`：手动冲刷到期防抖批次。

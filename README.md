@@ -109,7 +109,7 @@ curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
 | `GET /relay/support/overview` | 运营汇总计数（脱敏：不含 OpenID 与正文） |
 | `GET /relay/support/events` / `batches` / `feedbacks` / `cases` / `replies` / `triage-runs` / `allowlist` | 分表结构化检索（支持 `limit=1..200` 及分类/状态筛选） |
 | `POST /relay/support/cases` / `cases/{case_id}/close` | 创建或结案馆员待办 |
-| `POST /relay/support/allowlist/remove` | 从动态灰度白名单移除指定 `reader_id` |
+| `POST /relay/support/allowlist/remove` / `allowlist/clear` | 从动态灰度白名单移除指定 `reader_id` 或清空全部动态白名单 |
 | `POST /relay/support/flush-due` | 手工冲刷已到期 debounce 批次 |
 | `GET /relay/support/presets` | 查看已加载的 `1.` 固定答案及别名清单 |
 
@@ -119,7 +119,7 @@ curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
 
 - **只支持明文转发与直连直发**：云托管 `CheckContainerPath` 直接返回 `200 success` 不外发；自建后端校验 `RELAY_AUTH_TOKEN` 及 `x-wx-source` / `x-wx-env` / `x-wx-appid`。
 - **日志脱敏**：运行日志不打印 OpenID、消息正文、凭据或模型完整异常；发信错误仅保留 ASCII 安全 `errmsg`。
-- **灰度保护**：`SUPPORT_AUTO_REPLY_ALLOWLIST` 非空时，仅允许静态白名单及通过环境变量口令 `SUPPORT_GRAY_ENROLL_KEYWORD`（未配置时默认关闭，代码不硬编码口令）持久化入组的 OpenID 真实调用微信客服 API，其余读者消息全链路处理并留痕于 `outbound_replies(status='shadow')`。
+- **灰度保护**：`SUPPORT_AUTO_REPLY_ALLOWLIST` 或 `SUPPORT_GRAY_ENROLL_KEYWORD` 任一非空时即启用白名单门控（仅允许静态白名单及通过环境变量口令持久化入组的 OpenID 真实调用微信客服 API；未配置口令时默认关闭且代码不硬编码口令），其余读者消息全链路处理并留痕于 `outbound_replies(status='shadow')`。
 - **原始数据留存**：`inbound_events` 自动写入 `7` 天过期基准 `expires_at_epoch`，所有 SQLite 文件（`/var/lib/private/wechat-relay/`）与 `.env` 均处于 `.gitignore` 与版本库之外。
 
 ---
