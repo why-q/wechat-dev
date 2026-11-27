@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>图书馆智能客服 | 普通馆员</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <style>
+    .urgent-record { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; align-items: start; }
+    .urgent-record h2 { margin: 0; }
+    .urgent-record p { max-width: 58ch; }
+    .urgent-mark { color: #9a432d; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .case-list { list-style: none; margin: 0; padding: 0; }
+    .case-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem 1rem; padding: .9rem 0; border-top: 1px solid rgba(35, 57, 43, .14); }
+    .case-row:first-child { border-top: 0; }
+    .case-main { min-width: 0; }
+    .case-main h3 { margin: 0; font-size: 1rem; }
+    .case-meta { display: flex; flex-wrap: wrap; gap: .25rem .8rem; margin: .3rem 0 0; color: #58685b; font-size: .9rem; }
+    .case-state { align-self: start; white-space: nowrap; }
+    details { grid-column: 1 / -1; }
+    summary { width: fit-content; min-height: 40px; display: list-item; cursor: pointer; color: #315b3c; }
+    summary:focus-visible { outline: 2px solid #315b3c; outline-offset: 3px; }
+    .thread { margin: .15rem 0 .2rem; padding: .65rem .8rem; background: #f1f2e9; line-height: 1.75; }
+    .thread p { margin: 0; }
+    .thread p + p { margin-top: .45rem; }
+    .closed-summary { display: flex; flex-wrap: wrap; gap: .55rem 1.4rem; align-items: baseline; }
+    .closed-summary strong { font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+    .priority-panel { grid-column: 1 / -1; }
+    .queue-panel { grid-column: span 8; }
+    .closed-panel { grid-column: span 4; }
+    @media (max-width: 800px) {
+      .priority-panel, .queue-panel, .closed-panel { grid-column: 1; }
+    }
+    @media (max-width: 560px) {
+      .urgent-record { grid-template-columns: 1fr; }
+      .urgent-mark { grid-row: 1; }
+      .case-row { gap: .55rem; }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="shell">
+    <header class="masthead">
+      <a class="brand" href="index.html" aria-label="图书馆智能客服首页">
+        <span class="brand-mark" aria-hidden="true">馆</span>
+        <span>图书馆智能客服</span>
+      </a>
+      <nav class="role-switch" aria-label="工作视图">
+        <a href="index.html">管理员</a>
+        <a href="librarian.html" aria-current="page">普通馆员</a>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="page-head" aria-labelledby="page-title">
+        <div>
+          <h1 id="page-title">待办咨询</h1>
+          <p class="lede">先看紧急事项，再浏览值班队列中的普通未结案咨询。</p>
+        </div>
+        <span class="demo-tag">示例数据 · 全部虚构</span>
+      </section>
+
+      <section class="metric-strip" aria-label="当前队列概览">
+        <div class="metric"><span class="metric-label">待跟进</span><strong class="metric-value">7</strong><span class="metric-note">1 条紧急事项 + 6 条普通事项</span></div>
+        <div class="metric"><span class="metric-label">最早待办</span><strong class="metric-value">2 小时</strong><span class="metric-note">普通咨询队列</span></div>
+        <div class="metric"><span class="metric-label">今日已结</span><strong class="metric-value">12</strong><span class="metric-note">截至 16:20</span></div>
+      </section>
+
+      <div class="dashboard-grid">
+        <section class="panel priority-panel" aria-labelledby="priority-title">
+          <div class="panel-head">
+            <div><p class="eyebrow">紧急事项 · 虚构示例</p><h2 id="priority-title">电梯内有人受困</h2></div>
+            <span class="badge urgent">紧急</span>
+          </div>
+          <div class="urgent-record">
+            <div>
+              <p>示例状态：电梯故障，乘客已通过紧急呼叫装置求助。</p>
+              <p class="case-meta"><span>设施安全</span><span>今天 16:08 报告</span></p>
+            </div>
+            <span class="urgent-mark">系统已发送紧急联系方式</span>
+          </div>
+        </section>
+
+        <section class="panel queue-panel" aria-labelledby="queue-title">
+          <div class="panel-head">
+            <div><p class="eyebrow">值班队列</p><h2 id="queue-title">普通未结案咨询</h2></div>
+            <span class="badge muted">6 条</span>
+          </div>
+          <ol class="case-list">
+            <li class="case-row">
+              <div class="case-main"><h3>预约书到馆后如何领取</h3><p class="case-meta"><span>图书预约</span><span>今天 14:19 · 等待 2 小时</span></p></div>
+              <span class="badge muted case-state">待跟进</span>
+              <details><summary>查看读者留言示例</summary><div class="thread"><p><strong>读者 · 14:19：</strong>收到到馆通知后，可以请同事代取吗？</p></div></details>
+            </li>
+            <li class="case-row">
+              <div class="case-main"><h3>校外访问电子期刊</h3><p class="case-meta"><span>电子资源</span><span>今天 14:46 · 等待 1 小时 34 分</span></p></div>
+              <span class="badge muted case-state">待跟进</span>
+            </li>
+            <li class="case-row">
+              <div class="case-main"><h3>研修间开放时段</h3><p class="case-meta"><span>空间与设施</span><span>今天 15:02 · 等待 1 小时 18 分</span></p></div>
+              <span class="badge muted case-state">待跟进</span>
+              <details><summary>查看读者留言示例</summary><div class="thread"><p><strong>读者 · 15:02：</strong>周六下午可以预约小组研修间吗？</p></div></details>
+            </li>
+            <li class="case-row">
+              <div class="case-main"><h3>馆际互借的到书通知</h3><p class="case-meta"><span>馆际互借</span><span>今天 15:37 · 等待 43 分钟</span></p></div>
+              <span class="badge muted case-state">待跟进</span>
+            </li>
+            <li class="case-row">
+              <div class="case-main"><h3>学位论文的校内查阅方式</h3><p class="case-meta"><span>学术资源</span><span>今天 16:02 · 等待 18 分钟</span></p></div>
+              <span class="badge muted case-state">待跟进</span>
+            </li>
+            <li class="case-row">
+              <div class="case-main"><h3>借阅证补办需要的材料</h3><p class="case-meta"><span>读者服务</span><span>今天 16:14 · 等待 6 分钟</span></p></div>
+              <span class="badge muted case-state">待跟进</span>
+            </li>
+          </ol>
+        </section>
+
+        <section class="panel closed-panel" aria-labelledby="closed-title">
+          <div class="panel-head"><div><p class="eyebrow">刚刚完成</p><h2 id="closed-title">近期结案概览</h2></div><span class="badge good">今日</span></div>
+          <div class="closed-summary"><strong>12 条</strong><span>最近结案主题：馆内阅览座位、数据库校外访问、借阅期限说明</span></div>
+        </section>
+      </div>
+    </main>
+    <footer class="footer"><span>馆员工作视图</span><span>仅供界面演示 · 示例数据不对应真实读者或咨询</span></footer>
+  </div>
+</body>
+</html>
