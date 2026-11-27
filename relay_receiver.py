@@ -108,6 +108,9 @@ _SUPPORT_TIER2_TOP_K = _env_int("SUPPORT_TIER2_TOP_K", DEFAULT_TOP_K) or DEFAULT
 _SUPPORT_TIER2_MIN_SCORE = _env_float("SUPPORT_TIER2_MIN_SCORE", DEFAULT_MIN_SCORE)
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
+_CLOUD_EXPECTED_SOURCE = os.environ.get("WECHAT_CLOUD_EXPECTED_SOURCE", "").strip()
+_CLOUD_EXPECTED_ENV = os.environ.get("WECHAT_CLOUD_EXPECTED_ENV", "").strip()
+_CLOUD_EXPECTED_APPID = os.environ.get("WECHAT_CLOUD_EXPECTED_APPID", "").strip()
 _DIRECT_ECHO_TEXT = os.environ.get("RELAY_DIRECT_ECHO_TEXT", "").strip()
 _CLOUD_ECHO_TEXT = os.environ.get("RELAY_CLOUD_ECHO_TEXT", "").strip()
 
@@ -566,12 +569,34 @@ async def health() -> PlainTextResponse:
     return PlainTextResponse("ok", headers=_HEADERS)
 
 
+def _verify_cloud_headers(payload: dict[str, Any]) -> None:
+    checks = (
+        ("x-wx-source", _CLOUD_EXPECTED_SOURCE),
+        ("x-wx-env", _CLOUD_EXPECTED_ENV),
+        ("x-wx-appid", _CLOUD_EXPECTED_APPID),
+    )
+    if not any(expected for _, expected in checks):
+        return
+    wx_headers = payload.get("wx_headers")
+    for header_name, expected in checks:
+        if not expected:
+            continue
+        actual = wx_headers.get(header_name, "") if isinstance(wx_headers, dict) else ""
+        if not isinstance(actual, str) or not actual or not hmac.compare_digest(actual, expected):
+            _LOGGER.warning(
+                "Relay cloud callback rejected: reason=header_mismatch header=%s",
+                header_name,
+            )
+            raise HTTPException(403, "invalid cloud push source")
+
+
 @app.post("/relay/wechat", response_class=JSONResponse)
 async def receive_forwarded_wechat(
     request: Request, background_tasks: BackgroundTasks
 ) -> JSONResponse:
     _verify_bearer_token(request)
     payload = await _read_json_object(request)
+    _verify_cloud_headers(payload)
 
     msg_type = payload.get("msg_type")
     if not isinstance(msg_type, str) or not msg_type.strip():

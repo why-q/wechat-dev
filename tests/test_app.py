@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 import unittest
 from types import ModuleType
@@ -911,6 +913,63 @@ class CallbackDashboardTests(unittest.TestCase):
         logged = "\n".join(captured.output)
         self.assertIn("error_type=URLError reason_type=ConnectionResetError errno=104", logged)
         self.assertNotIn("secret.invalid", logged)
+
+    def test_relay_only_mode_defaults_require_only_forward_url_and_token(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(wechat_app._resolve_runtime_modes("", ""), (False, True, True))
+            self.assertEqual(
+                wechat_app._resolve_runtime_modes("https://receiver.invalid/relay/wechat", ""),
+                (True, False, False),
+            )
+            self.assertEqual(
+                wechat_app._resolve_runtime_modes(
+                    "https://receiver.invalid/relay/wechat", "signed-token"
+                ),
+                (False, False, False),
+            )
+
+        with patch.dict(
+            os.environ,
+            {
+                "WECHAT_CLOUD_PUSH_ENABLED": "false",
+                "WECHAT_AUTO_REPLY_ENABLED": "true",
+                "DASHBOARD_ENABLED": "true",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                wechat_app._resolve_runtime_modes("https://receiver.invalid/relay/wechat", ""),
+                (False, True, True),
+            )
+
+        repo_root = Path(__file__).resolve().parent.parent
+        probe = "\n".join(
+            [
+                "import asyncio",
+                "import app",
+                "assert app._CLOUD_PUSH_ENABLED is True",
+                "assert app._AUTO_REPLY_ENABLED is False",
+                "assert app._DASHBOARD_ENABLED is False",
+                "async def check():",
+                "    async with app._lifespan(app.app):",
+                "        assert getattr(app.app.state, 'rag_responder', None) is None",
+                "asyncio.run(check())",
+            ]
+        )
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "WECHAT_FORWARD_URL": "https://receiver.invalid/relay/wechat",
+            "WECHAT_FORWARD_TOKEN": "relay-only-token",
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            cwd=str(repo_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
 
 
 if __name__ == "__main__":

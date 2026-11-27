@@ -39,3 +39,4 @@
 
 
 
+{"date":"2026-11-27","event":"cloud_hosting_env_slim_and_server_env_consolidation","status":"implemented","actions":["Derived relay-only defaults in app.py so Cloud Hosting only requires WECHAT_FORWARD_URL and WECHAT_FORWARD_TOKEN","Added WECHAT_CLOUD_EXPECTED_SOURCE/ENV/APPID validation to relay_receiver.py and switched wechat-relay.service to /etc/wechat-relay.env as sole EnvironmentFile","Added deploy/wechat-relay.env.example and updated unit tests and pipeline documentation"],"evidence":{"historical_cloud_header_tuples_verified":296},"artifacts":["app.py","relay_receiver.py","wechat-relay.service","deploy/wechat-relay.env.example","tests/test_app.py","tests/test_relay_receiver.py","docs/CLOUD-FORWARD-TEST-PIPELINE.md","BACKGROUND.md"]}

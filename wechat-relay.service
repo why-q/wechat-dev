@@ -15,16 +15,12 @@ BindReadOnlyPaths=/root/Work/wechat_dev_test/rag-poc/.venv:/srv/wechat-relay/.ve
 StateDirectory=wechat-relay
 StateDirectoryMode=0700
 Environment=HOME=/var/lib/private/wechat-relay
-EnvironmentFile=/root/Work/wechat_dev_test/.env
-EnvironmentFile=-/root/Work/wechat_dev_test/rag-poc/.env
-EnvironmentFile=-/etc/wechat-relay.env
+EnvironmentFile=/etc/wechat-relay.env
 Environment=RELAY_LOG_PATH=/var/lib/private/wechat-relay/relay-events.jsonl
 Environment=SUPPORT_DB_PATH=/var/lib/private/wechat-relay/library-support.db
 Environment=SUPPORT_CORPUS_DIR=/srv/wechat-relay/rag-poc/corpus
 Environment=SUPPORT_INDEX_DIR=/srv/wechat-relay/rag-poc/index_v2
 Environment=RAG_NLTK_DATA_DIR=/var/lib/private/wechat-relay/nltk_data
-Environment=SUPPORT_MERGE_ENABLED=false
-Environment=SUPPORT_IMMEDIATE_MAX_PREEMPTS=2
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/srv/wechat-relay/.venv/bin/python -m uvicorn relay_receiver:app --app-dir /srv/wechat-relay --host 127.0.0.1 --port 8090 --no-access-log --no-server-header

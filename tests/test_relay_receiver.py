@@ -309,6 +309,63 @@ class RelayReceiverTests(unittest.TestCase):
         self.assertNotIn("cloud_test_reply", b2)
         send_mock.assert_called_once_with("reader-echo", "直连回声")
 
+    def test_cloud_expected_headers_verify_forwarded_wx_headers(self):
+        base = {
+            "transport": "cloud",
+            "msg_type": "text",
+            "msg_id": "hdr-check-1",
+            "from_user": "reader-1",
+            "content": "测试来源头校验",
+        }
+        missing_headers = json.dumps(base, ensure_ascii=False).encode("utf-8")
+        mismatched = json.dumps(
+            {
+                **base,
+                "wx_headers": {
+                    "x-wx-source": "other",
+                    "x-wx-env": "wrong-env",
+                    "x-wx-appid": "wx-app-1",
+                },
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        matched = json.dumps(
+            {
+                **base,
+                "wx_headers": {
+                    "x-wx-source": "other",
+                    "x-wx-env": "prod-env",
+                    "x-wx-appid": "wx-app-1",
+                },
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+        with patch.object(relay_receiver, "_AUTH_TOKEN", "expected-token"):
+            with patch.object(relay_receiver, "_CLOUD_EXPECTED_SOURCE", "other"):
+                with patch.object(relay_receiver, "_CLOUD_EXPECTED_ENV", "prod-env"):
+                    with patch.object(relay_receiver, "_CLOUD_EXPECTED_APPID", "wx-app-1"):
+                        auth = {"authorization": "Bearer expected-token"}
+                        with self.assertLogs("uvicorn.error", level="WARNING") as captured:
+                            r_missing = self.client.request(
+                                "POST", "/relay/wechat", body=missing_headers, headers=auth
+                            )
+                            r_bad = self.client.request(
+                                "POST", "/relay/wechat", body=mismatched, headers=auth
+                            )
+                        r_ok = self.client.request(
+                            "POST", "/relay/wechat", body=matched, headers=auth
+                        )
+
+        self.assertEqual(r_missing.status_code, 403)
+        self.assertEqual(r_bad.status_code, 403)
+        self.assertEqual(r_ok.status_code, 200)
+        self.assertEqual(json.loads(r_ok.text)["seq"], 1)
+        logged = "\n".join(captured.output)
+        self.assertIn("reason=header_mismatch header=x-wx-source", logged)
+        self.assertIn("reason=header_mismatch header=x-wx-env", logged)
+        self.assertEqual(len(self.log_path.read_text(encoding="utf-8").splitlines()), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

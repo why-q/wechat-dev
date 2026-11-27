@@ -54,17 +54,18 @@ def _validate_forward_url(url: str) -> str:
     return cleaned
 
 
+def _resolve_runtime_modes(forward_url: str, token: str) -> tuple[bool, bool, bool]:
+    """Derive relay-only defaults when forwarding to an external backend."""
+    relay_only = bool(forward_url)
+    cloud_push = _env_flag("WECHAT_CLOUD_PUSH_ENABLED", relay_only and not token)
+    auto_reply = _env_flag("WECHAT_AUTO_REPLY_ENABLED", not relay_only)
+    dashboard = _env_flag("DASHBOARD_ENABLED", not relay_only)
+    return cloud_push, auto_reply, dashboard
+
+
 _TOKEN = os.environ.get("WECHAT_TOKEN", "")
 _APP_ID = os.environ.get("WECHAT_APP_ID", "")
 _APP_SECRET = os.environ.get("WECHAT_APP_SECRET", "")
-_CLOUD_PUSH_ENABLED = _env_flag("WECHAT_CLOUD_PUSH_ENABLED", False)
-_CLOUD_EXPECTED_SOURCE = os.environ.get("WECHAT_CLOUD_EXPECTED_SOURCE", "").strip()
-_CLOUD_EXPECTED_ENV = os.environ.get("WECHAT_CLOUD_EXPECTED_ENV", "").strip()
-_CLOUD_EXPECTED_APPID = os.environ.get("WECHAT_CLOUD_EXPECTED_APPID", "").strip()
-_AUTO_REPLY_ENABLED = _env_flag("WECHAT_AUTO_REPLY_ENABLED", True)
-_DASHBOARD_ENABLED = _env_flag("DASHBOARD_ENABLED", True)
-_WECHAT_OPEN_API_ENABLED = _env_flag("WECHAT_OPEN_API_ENABLED", False)
-_RAG_DEBUG_TOKEN = os.environ.get("RAG_DEBUG_TOKEN", "")
 _FORWARD_URL = _validate_forward_url(os.environ.get("WECHAT_FORWARD_URL", ""))
 _FORWARD_TOKEN = os.environ.get("WECHAT_FORWARD_TOKEN", "")
 _FORWARD_TIMEOUT_SECONDS = _env_float(
@@ -72,6 +73,14 @@ _FORWARD_TIMEOUT_SECONDS = _env_float(
 )
 _FORWARD_FAIL_OPEN = _env_flag("WECHAT_FORWARD_FAIL_OPEN", True)
 _FORWARD_ALLOW_TEST_REPLY = _env_flag("WECHAT_FORWARD_ALLOW_TEST_REPLY", False)
+_CLOUD_PUSH_ENABLED, _AUTO_REPLY_ENABLED, _DASHBOARD_ENABLED = _resolve_runtime_modes(
+    _FORWARD_URL, _TOKEN
+)
+_CLOUD_EXPECTED_SOURCE = os.environ.get("WECHAT_CLOUD_EXPECTED_SOURCE", "").strip()
+_CLOUD_EXPECTED_ENV = os.environ.get("WECHAT_CLOUD_EXPECTED_ENV", "").strip()
+_CLOUD_EXPECTED_APPID = os.environ.get("WECHAT_CLOUD_EXPECTED_APPID", "").strip()
+_WECHAT_OPEN_API_ENABLED = _env_flag("WECHAT_OPEN_API_ENABLED", False)
+_RAG_DEBUG_TOKEN = os.environ.get("RAG_DEBUG_TOKEN", "")
 if not _TOKEN and not _CLOUD_PUSH_ENABLED:
     raise RuntimeError("WECHAT_TOKEN must be set unless Cloud Hosting push mode is enabled")
 

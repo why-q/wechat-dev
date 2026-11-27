@@ -1,89 +1,50 @@
-# Step 1 · 微信云托管消息转发与回发验证管道
+# Step 1 · 微信云托管极简转发与自建服务器环境集中配置
 
 ## 目标
 
-对应 [图书馆智能客服设计](LIBRARY-SUPPORT-DESIGN.md) 数据流图中的 `Message -> Wechat Cloud -> API Server` 及 [自动回复时序](LIBRARY-SUPPORT-DESIGN.md#自动回复时序)：
-1. 验证微信云托管（GitHub + `Dockerfile`）转发消息至自有公网服务器（**已实测验证通过**）。
-2. 将接收端切到 Nginx HTTPS + `systemd` 守护，并收紧云托管 `x-wx-*` 请求头校验。
-3. 在同一管道上完成出站客服消息 `custom/send` 验证，核实 API 返回码与手机实际收件。
+微信云托管仅作为入口消息转发器使用（`app.py`），所有回复逻辑、凭证、模型密钥与运行开关统一收敛在自建服务器环境变量文件 `/etc/wechat-relay.env` 中，使云托管侧仅需保留最少的转发配置。
 
 ## 首次实测记录（2026-11-26）
 
-从自有服务器本地采集到的 2 条真实转发事件确认：
-- 传输格式为 `application/json`；云托管收到推送与自有服务器落地在同一秒内完成。
-- `msg_type=event`（如菜单点击，含 `Event`、`EventKey`、`MenuId`）不含 `MsgId`；`msg_type=text` 包含 `MsgId`。
-- 云托管附加请求头键为 `x-wx-appid`、`x-wx-env`、`x-wx-openid`、`x-wx-region`、`x-wx-service`、`x-wx-source`，其中 `x-wx-source` 实测值为 `other`。
+- 已完成 `微信云托管转发 -> https://wechat-dev.llink.cyou/relay/wechat -> /relay/send-test` 双向全链路真机验证，`custom/send` 直连回发返回 `errcode=0` 且手机确认收到回复。
+- 已查明线上云托管真实推送头：`x-wx-source=other`、`x-wx-env=ai-customer-service-d9bn16017181`、`x-wx-appid` 与服务号 `WECHAT_APP_ID` 一致，因此 `WECHAT_CLOUD_EXPECTED_*` 可直接下沉到自建服务器校验。
 
-## 架构与行为
+## 环境变量职责划分
 
-1. **云托管端转发与来源校验（[app.py](../app.py)）**
-   - 当 `WECHAT_FORWARD_URL` 为非空 `http://` 或 `https://` 地址时，`/wechat` 在跳过 `action="CheckContainerPath"` 检测后，按可选的 `WECHAT_CLOUD_EXPECTED_SOURCE`（推荐 `other`）、`WECHAT_CLOUD_EXPECTED_ENV`、`WECHAT_CLOUD_EXPECTED_APPID` 校验云内推送请求头（不匹配返回 `403`）。
-   - 随后同步（worker 线程、`WECHAT_FORWARD_TIMEOUT_SECONDS` 默认 `3.0` 秒、上限 `4.5` 秒）向目标地址 `POST` JSON 信封；默认 `WECHAT_FORWARD_FAIL_OPEN=true`，避免转发异常导致正式服务号报错。
-   - 若显式设置 `WECHAT_FORWARD_ALLOW_TEST_REPLY=true` 且接收端返回非重复事件的 `cloud_test_reply` 字段，则触发云端 `_send_customer_message`（可验证 `WECHAT_OPEN_API_ENABLED=true` 云调用发信），并在非零 `errcode` 时安全记录 `errmsg`。
+### 1. 微信云托管环境变量（仅保留 2 项）
 
-2. **自有服务器接收与回发测试端（[relay_receiver.py](../relay_receiver.py)）**
-   - 启动强制校验 `RELAY_AUTH_TOKEN` 非空，防止无鉴权暴露。
-   - `GET /healthz`：无需鉴权，返回 `200 ok`。
-   - `POST /relay/wechat`：校验 `Authorization: Bearer <RELAY_AUTH_TOKEN>`；按非空 `msg_id` 去重（重启后从 JSONL 恢复）；以目录 `0700`、文件 `0600` 持久化写入 `RELAY_LOG_PATH`（默认 `data/relay-events.jsonl`）。可选 `RELAY_DIRECT_ECHO_TEXT`（触发直连回发）或 `RELAY_CLOUD_ECHO_TEXT`（配合 `WECHAT_FORWARD_ALLOW_TEST_REPLY=true` 测试云调用回发）。
-   - `GET /relay/events?limit=20`：需 Bearer 鉴权，倒序返回最近收到的事件。
-   - `POST /relay/send-test`：需 Bearer 鉴权，传入 `{"seq": 2, "text": "..."}`（或 `to_user`），使用 `WECHAT_APP_ID` + `WECHAT_APP_SECRET` 直连 `https://api.weixin.qq.com/cgi-bin/message/custom/send`（含 `access_token` 缓存与 `40001` 单次刷新重试），返回 `errcode`、`errmsg` 与耗时。
+`app.py` 在检测到 `WECHAT_FORWARD_URL` 且未设置 `WECHAT_TOKEN` 时，会自动采用纯转发默认配置（`WECHAT_CLOUD_PUSH_ENABLED=true`、`WECHAT_AUTO_REPLY_ENABLED=false`、`DASHBOARD_ENABLED=false`，不加载本地 RAG，也不暴露本地看板）：
 
-3. **Nginx HTTPS 与 systemd（[deploy/nginx-wechat-dev-test.conf](../deploy/nginx-wechat-dev-test.conf) · [wechat-relay.service](../wechat-relay.service)）**
-   - Nginx 在 `80` 与 `443 ssl`（使用 `/etc/ssl/nginx/cert.pem`——由 ZeroSSL 签发的公共受信任 `*.llink.cyou` 完整证书链）统一反代 `/healthz`、`/relay/wechat`、`/relay/events`、`/relay/send-test` 到 `127.0.0.1:8090`，并保留 `/wechat` 回滚入口。
-   - **Cloudflare 与出网说明**：若 `wechat-dev.llink.cyou` 开启 Cloudflare 橙云代理，实测中国大陆云托管容器出网访问 Cloudflare Anycast IP 会在握手阶段报 `URLError`（约 175ms），且 Cloudflare 默认以 `403` 拦截未显式指定 `User-Agent` 的 `Python-urllib` 请求（`app.py` 已补 `User-Agent: WeChatRelay/1.0` 及 `URLError` 的 `reason_type`/`errno` 安全诊断日志）。由于本机 Nginx 已自带公共受信任 ZeroSSL 证书，建议在 Cloudflare 将 `wechat-dev` DNS 记录改为 **DNS Only（灰云，仅解析不走 Cloudflare 代理）**，让云托管直连本机公网 IP 的 `443` TLS。
-   - `wechat-relay.service` 使用 `DynamicUser=yes`、`StateDirectory=wechat-relay`，读取 `.env` 与可选 `/etc/wechat-relay.env`（格式须为 `RELAY_AUTH_TOKEN=...` 键值对），将数据保存在 `/var/lib/private/wechat-relay/relay-events.jsonl`。
-
-## 验证操作步骤
-
-### 1. 服务器启用 HTTPS 与 systemd
-
-1. 将共享 `RELAY_AUTH_TOKEN` 以 `KEY=VALUE` 格式写入权限为 `0600` 的 `/etc/wechat-relay.env`（不要写入 Git）：
-
-```bash
-sudo install -m 0600 /dev/null /etc/wechat-relay.env
-printf 'RELAY_AUTH_TOKEN=%s\n' '<与云托管 WECHAT_FORWARD_TOKEN 相同的值>' | sudo tee /etc/wechat-relay.env >/dev/null
-```
-2. 安装单元与 Nginx 配置并重启：
-
-```bash
-sudo ln -sf /root/Work/wechat_dev_test/wechat-relay.service /etc/systemd/system/wechat-relay.service
-sudo cp /root/Work/wechat_dev_test/deploy/nginx-wechat-dev-test.conf /etc/nginx/conf.d/wechat_dev_test.conf
-sudo nginx -t && sudo systemctl reload nginx
-sudo systemctl daemon-reload && sudo systemctl enable --now wechat-relay.service
-```
-
-3. 验证公网 HTTPS：
-
-```bash
-curl --fail https://wechat-dev.llink.cyou/healthz
-```
-
-### 2. 更新云托管环境变量（紧校验 + HTTPS）
-
-```text
-WECHAT_CLOUD_PUSH_ENABLED=true
-WECHAT_AUTO_REPLY_ENABLED=false
-DASHBOARD_ENABLED=false
-WECHAT_CLOUD_EXPECTED_SOURCE=other
-WECHAT_CLOUD_EXPECTED_ENV=<你的云环境ID>
-WECHAT_CLOUD_EXPECTED_APPID=<你的公众号AppID>
+```ini
 WECHAT_FORWARD_URL=https://wechat-dev.llink.cyou/relay/wechat
-WECHAT_FORWARD_TOKEN=<与 RELAY_AUTH_TOKEN 相同>
-WECHAT_FORWARD_TIMEOUT_SECONDS=3.0
-WECHAT_FORWARD_FAIL_OPEN=true
+WECHAT_FORWARD_TOKEN=<与自建服务器 RELAY_AUTH_TOKEN 一致>
 ```
 
-### 3. 测试出站回发到手机
+> [!NOTE]
+> 此前在云托管设置的 `WECHAT_CLOUD_PUSH_ENABLED`、`WECHAT_AUTO_REPLY_ENABLED`、`DASHBOARD_ENABLED`、`WECHAT_CLOUD_EXPECTED_SOURCE/ENV/APPID`、`WECHAT_TOKEN`、`WECHAT_APP_ID`、`WECHAT_APP_SECRET` 与 `RAG_*` 均可删除，无需继续维护在云托管控制台。默认转发超时 `3.0s`、默认 `WECHAT_FORWARD_FAIL_OPEN=true`。
 
-1. **方式 A（自有服务器直连 `custom/send`，优先）**：先用手机给公众号发一条消息（记下 `seq`），然后运行：
+### 2. 自建服务器环境变量（统一收敛到 `/etc/wechat-relay.env`）
 
-```bash
-curl -sS -X POST https://wechat-dev.llink.cyou/relay/send-test \
-  -H "Authorization: Bearer $RELAY_AUTH_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"seq":1,"text":"测试自有服务器直连回复"}'
-```
+`wechat-relay.service` 仅读取 `/etc/wechat-relay.env`（权限 `0600`，结构见 [wechat-relay.env.example](../deploy/wechat-relay.env.example)）；沙盒绑定与本地数据路径仍由 [wechat-relay.service](../wechat-relay.service) 固定提供：
 
-记录返回的 `errcode`、`errmsg` 并核对手机是否收到该消息。
+- **转发鉴权与来源头校验**：`RELAY_AUTH_TOKEN`、`WECHAT_CLOUD_EXPECTED_SOURCE`、`WECHAT_CLOUD_EXPECTED_ENV`、`WECHAT_CLOUD_EXPECTED_APPID`（`relay_receiver.py` 在 `/relay/wechat` 校对被转发的 `wx_headers`，`CheckContainerPath` 探测不触发转发）。
+- **微信直连回发凭证**：`WECHAT_APP_ID`、`WECHAT_APP_SECRET`。
+- **Tier 1 / Tier 2 模型配置**：`SUPPORT_DECISION_BASE_URL`、`SUPPORT_DECISION_API_KEY`、`RAG_LLM_*`、`RAG_EMBEDDING_*`。
+- **运行开关与测试白名单**：`SUPPORT_AUTO_REPLY_ENABLED`、`SUPPORT_AUTO_REPLY_ALLOWLIST`、`SUPPORT_MERGE_ENABLED`、`SUPPORT_IMMEDIATE_MAX_PREEMPTS`。
 
-2. **方式 B（云托管开放接口服务 `custom/send`，按需对照）**：在云托管临时加设 `WECHAT_OPEN_API_ENABLED=true`、`WECHAT_FORWARD_ALLOW_TEST_REPLY=true`（并确认云托管开放接口服务已将 `/cgi-bin/message/custom/send` 加入云调用白名单），在 `/etc/wechat-relay.env` 临时设置 `RELAY_CLOUD_ECHO_TEXT=测试云调用回复` 后重启 `wechat-relay.service`，手机发消息触发一次回发，查看云托管日志的 `errcode`/`errmsg` 与手机收件，测毕清除这两个临时开关。
+> [!TIP]
+> 仓库根 `.env` 与 `rag-poc/.env` 仅保留作离线脚本（如 `rag-poc/.venv/bin/python -m support_backend build-index --env-file rag-poc/.env`）或紧急切回 `wechat-dev-test.service` 使用；线上主服务 `wechat-relay.service` 只认 `/etc/wechat-relay.env`。
+
+## 验证与日常维护命令
+
+1. **检查服务与状态**：
+   ```bash
+   systemctl reload-or-restart wechat-relay.service
+   curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" https://wechat-dev.llink.cyou/relay/support/overview
+   ```
+2. **查看最近转发与出站测试回复**：
+   ```bash
+   curl -fsS -H "Authorization: Bearer $RELAY_AUTH_TOKEN" "https://wechat-dev.llink.cyou/relay/events?limit=5"
+   curl -fsS -X POST -H "Authorization: Bearer $RELAY_AUTH_TOKEN" -H "Content-Type: application/json" \
+     -d '{"seq":1,"text":"测试直连回发"}' https://wechat-dev.llink.cyou/relay/send-test
+   ```
