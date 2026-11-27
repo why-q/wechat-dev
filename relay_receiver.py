@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from support_backend import (
     DEFAULT_DECISION_MODEL,
     DEFAULT_DECISION_TIMEOUT_SECONDS,
+    DEFAULT_GRAY_ENROLL_KEYWORD,
     DEFAULT_LONG_ANSWER_CHARS,
     DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
@@ -65,6 +66,9 @@ _SUPPORT_AUTO_REPLY_ENABLED = _env_bool("SUPPORT_AUTO_REPLY_ENABLED", default=Fa
 _SUPPORT_AUTO_REPLY_ALLOWLIST = _parse_allowlist(
     os.environ.get("SUPPORT_AUTO_REPLY_ALLOWLIST", "")
 )
+_SUPPORT_GRAY_ENROLL_KEYWORD = os.environ.get(
+    "SUPPORT_GRAY_ENROLL_KEYWORD", DEFAULT_GRAY_ENROLL_KEYWORD
+).strip()
 _SUPPORT_CORPUS_DIR_RAW = os.environ.get("SUPPORT_CORPUS_DIR", "rag-poc/corpus").strip()
 _SUPPORT_INDEX_DIR_RAW = os.environ.get("SUPPORT_INDEX_DIR", "rag-poc/index_v2").strip()
 _SUPPORT_DECISION_BASE_URL = os.environ.get("SUPPORT_DECISION_BASE_URL", "").strip()
@@ -464,6 +468,7 @@ async def _lifespan(application: FastAPI):
         send_text_fn=_DIRECT_CLIENT.send_text,
         auto_reply_enabled=_SUPPORT_AUTO_REPLY_ENABLED,
         auto_reply_allowlist=_SUPPORT_AUTO_REPLY_ALLOWLIST,
+        gray_enroll_keyword=_SUPPORT_GRAY_ENROLL_KEYWORD,
         triage_fn=responder.triage,
     )
     pipeline.commit_handler = lambda outcome, plan: responder.apply_committed_plan(
@@ -473,7 +478,7 @@ async def _lifespan(application: FastAPI):
     application.state.support_pipeline = pipeline
     await pipeline.start()
     _LOGGER.info(
-        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d presets=%d decision_ready=%s tier2_ready=%s has_direct_creds=%s auto_reply=%s allowlist_count=%d cloud_header_checks=%s direct_echo=%s cloud_echo=%s",
+        "Relay receiver ready: log_path=%s db_path=%s merge_enabled=%s max_preempts=%d presets=%d decision_ready=%s tier2_ready=%s has_direct_creds=%s auto_reply=%s allowlist_count=%d gray_enroll=%s cloud_header_checks=%s direct_echo=%s cloud_echo=%s",
         _LOG_PATH,
         db_path,
         str(_SUPPORT_MERGE_ENABLED).lower(),
@@ -483,7 +488,8 @@ async def _lifespan(application: FastAPI):
         str(knowledge_responder is not None).lower(),
         str(bool(_APP_ID and _APP_SECRET)).lower(),
         str(_SUPPORT_AUTO_REPLY_ENABLED).lower(),
-        len(pipeline.auto_reply_allowlist),
+        len(pipeline.auto_reply_allowlist | support_store.allowlist_reader_ids()),
+        str(bool(pipeline.gray_enroll_keyword)).lower(),
         str(bool(_CLOUD_EXPECTED_SOURCE or _CLOUD_EXPECTED_ENV or _CLOUD_EXPECTED_APPID)).lower(),
         str(bool(_DIRECT_ECHO_TEXT)).lower(),
         str(bool(_CLOUD_ECHO_TEXT)).lower(),
@@ -648,10 +654,12 @@ async def send_test_reply(request: Request) -> JSONResponse:
 async def support_overview(request: Request) -> JSONResponse:
     pipeline = _require_authed_pipeline(request)
     responder = getattr(request.app.state, "support_responder", None)
+    dynamic_readers = pipeline.store.allowlist_reader_ids()
     return JSONResponse(
         {
             "auto_reply_enabled": pipeline.auto_reply_enabled,
-            "auto_reply_allowlist_count": len(pipeline.auto_reply_allowlist),
+            "auto_reply_allowlist_count": len(pipeline.auto_reply_allowlist | dynamic_readers),
+            "gray_enroll_enabled": bool(pipeline.gray_enroll_keyword),
             "preset_count": len(responder.preset_catalog.presets) if responder is not None else 0,
             "decision_router_ready": bool(responder is not None and responder.decision_client is not None),
             "tier2_ready": bool(responder is not None and responder.knowledge_responder is not None),
@@ -659,6 +667,37 @@ async def support_overview(request: Request) -> JSONResponse:
         },
         headers=_HEADERS,
     )
+
+
+@app.get("/relay/support/allowlist", response_class=JSONResponse)
+async def list_support_allowlist(
+    request: Request,
+    limit: int = Query(default=200, ge=1, le=200),
+) -> JSONResponse:
+    pipeline = _require_authed_pipeline(request)
+    entries = pipeline.store.list_allowlist(limit=limit)
+    return JSONResponse(
+        {
+            "static_count": len(pipeline.auto_reply_allowlist),
+            "count": len(entries),
+            "gray_enroll_enabled": bool(pipeline.gray_enroll_keyword),
+            "entries": entries,
+        },
+        headers=_HEADERS,
+    )
+
+
+@app.post("/relay/support/allowlist/remove", response_class=JSONResponse)
+async def remove_support_allowlist(request: Request) -> JSONResponse:
+    pipeline = _require_authed_pipeline(request)
+    payload = await _read_json_object(request)
+    reader_id = payload.get("reader_id")
+    if not isinstance(reader_id, str) or not reader_id.strip():
+        raise HTTPException(422, "reader_id must be a non-empty string")
+    raw_account = payload.get("account_id")
+    account_id = raw_account.strip() if isinstance(raw_account, str) and raw_account.strip() else None
+    removed = pipeline.store.remove_allowlist(reader_id.strip(), account_id=account_id)
+    return JSONResponse({"removed": removed}, headers=_HEADERS)
 
 
 @app.get("/relay/support/events", response_class=JSONResponse)

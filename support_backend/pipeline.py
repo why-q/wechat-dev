@@ -9,7 +9,14 @@ import logging
 from typing import Any, Awaitable, Callable
 
 from .db import FlushOutcome, IngestResult, SupportStore
-from .filters import EMERGENCY_CONTACT_REPLY, FEEDBACK_RECEIVED_REPLY, classify_message
+from .filters import (
+    DEFAULT_GRAY_ENROLL_KEYWORD,
+    EMERGENCY_CONTACT_REPLY,
+    FEEDBACK_RECEIVED_REPLY,
+    GRAY_ENROLL_ADDED_REPLY,
+    GRAY_ENROLL_ALREADY_REPLY,
+    classify_message,
+)
 from .shared import safe_errmsg as _safe_errmsg, safe_token
 
 SendTextFn = Callable[[str, str], dict[str, Any]]
@@ -33,6 +40,7 @@ class SupportPipeline:
         send_text_fn: SendTextFn | None = None,
         auto_reply_enabled: bool = False,
         auto_reply_allowlist: Iterable[str] | None = None,
+        gray_enroll_keyword: str = DEFAULT_GRAY_ENROLL_KEYWORD,
         triage_fn: BatchFlushedHook | None = None,
         commit_handler: CommitHandlerHook | None = None,
         on_batch_flushed: BatchFlushedHook | None = None,
@@ -45,6 +53,7 @@ class SupportPipeline:
             if auto_reply_allowlist is not None
             else frozenset()
         )
+        self.gray_enroll_keyword = gray_enroll_keyword.strip() if isinstance(gray_enroll_keyword, str) else ""
         self.triage_fn = triage_fn
         self.commit_handler = commit_handler
         self.on_batch_flushed = on_batch_flushed
@@ -72,13 +81,14 @@ class SupportPipeline:
 
         next_deadline = self.store.next_open_deadline()
         _LOGGER.info(
-            "Support pipeline started: merge_enabled=%s max_preempts=%d recovered_open=%d recovered_immediate=%d pending_open_deadline=%s auto_reply=%s",
+            "Support pipeline started: merge_enabled=%s max_preempts=%d recovered_open=%d recovered_immediate=%d pending_open_deadline=%s auto_reply=%s gray_enroll=%s",
             str(self.store.merge_enabled).lower(),
             self.store.max_preempts,
             len(recovered),
             len(pending_immediate),
             f"{next_deadline:.3f}" if next_deadline is not None else "-",
             str(self.auto_reply_enabled).lower(),
+            str(bool(self.gray_enroll_keyword)).lower(),
         )
         return recovered
 
@@ -121,7 +131,12 @@ class SupportPipeline:
         msg_type = payload.get("msg_type") if isinstance(payload.get("msg_type"), str) else ""
         content = payload.get("content") if isinstance(payload.get("content"), str) else ""
         event = payload.get("event") if isinstance(payload.get("event"), str) else ""
-        decision = classify_message(msg_type=msg_type, content=content, event=event)
+        decision = classify_message(
+            msg_type=msg_type,
+            content=content,
+            event=event,
+            gray_enroll_keyword=self.gray_enroll_keyword,
+        )
         result = self.store.ingest_event(payload, decision, client_ip=client_ip)
         _LOGGER.info(
             "Support ingest persisted: seq=%d duplicate=%s category=%s reason=%s batch_id=%s count=%s gen=%s",
@@ -162,6 +177,21 @@ class SupportPipeline:
                 trigger_kind="feedback",
                 trigger_ref_id=result.feedback_id,
                 content=FEEDBACK_RECEIVED_REPLY,
+            )
+        elif category == "gray_enroll" and reader_id:
+            already_static = reader_id in self.auto_reply_allowlist
+            newly_added = bool(result.allowlist_enrolled) and not already_static
+            _LOGGER.info(
+                "Support gray allowlist processed: seq=%d newly_added=%s",
+                result.seq,
+                str(newly_added).lower(),
+            )
+            await self._deliver_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind="gray_enroll",
+                trigger_ref_id=result.seq,
+                content=GRAY_ENROLL_ADDED_REPLY if newly_added else GRAY_ENROLL_ALREADY_REPLY,
             )
         elif category == "question" and result.batch is not None:
             if result.batch.status == "open":
@@ -371,7 +401,11 @@ class SupportPipeline:
         if not self.auto_reply_enabled or self.send_text_fn is None:
             shadow_reason = "disabled"
         elif self.auto_reply_allowlist and reader_id not in self.auto_reply_allowlist:
-            shadow_reason = "not_in_allowlist"
+            in_dynamic = await asyncio.to_thread(
+                self.store.is_allowlisted, account_id, reader_id
+            )
+            if not in_dynamic:
+                shadow_reason = "not_in_allowlist"
 
         if shadow_reason is not None:
             reply_id = self.store.record_outbound_reply(

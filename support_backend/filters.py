@@ -22,6 +22,16 @@ FEEDBACK_RECEIVED_REPLY = (
     "如需咨询具体馆藏或借阅问题，欢迎随时继续发送文字消息。"
 )
 
+DEFAULT_GRAY_ENROLL_KEYWORD = ""
+
+GRAY_ENROLL_ADDED_REPLY = (
+    "已将您加入图书馆 AI 客服自动回复灰度测试白名单！接下来您可以直接发送图书馆相关问题进行测试。"
+)
+
+GRAY_ENROLL_ALREADY_REPLY = (
+    "您已在图书馆 AI 客服自动回复灰度测试白名单中，可直接发送图书馆相关问题进行测试。"
+)
+
 _URL_ONLY_RE = re.compile(
     r"^(?:https?://\S+|www\.\S+)(?:\s+(?:https?://\S+|www\.\S+))*$",
     re.IGNORECASE,
@@ -127,7 +137,7 @@ _DISTINCT_NEW_TOPIC_RE = re.compile(
 class FilterDecision:
     """Outcome of classifying one inbound WeChat message or event."""
 
-    category: str  # emergency | feedback | unsupported | question | invalid
+    category: str  # emergency | feedback | gray_enroll | unsupported | question | invalid
     reason: str
     normalized_text: str
 
@@ -146,6 +156,18 @@ def _strip_edge_punctuation(text: str) -> str:
     return "".join(chars)
 
 
+def _normalize_keyword(text: str) -> str:
+    """Normalize a short command keyword while keeping internal word boundaries intact."""
+    normalized = _normalize_for_match(text)
+    start = 0
+    end = len(normalized)
+    while start < end and unicodedata.category(normalized[start]).startswith(("P", "S", "C", "Z")):
+        start += 1
+    while end > start and unicodedata.category(normalized[end - 1]).startswith(("P", "S", "C", "Z")):
+        end -= 1
+    return " ".join(normalized[start:end].split()).casefold()
+
+
 def _extract_cjk_bigrams(text: str) -> set[str]:
     compact = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", text.lower())
     if len(compact) < 2:
@@ -157,6 +179,8 @@ def classify_message(
     msg_type: str,
     content: str = "",
     event: str = "",
+    *,
+    gray_enroll_keyword: str = DEFAULT_GRAY_ENROLL_KEYWORD,
 ) -> FilterDecision:
     """Classify an inbound callback payload into Filter branches."""
     normalized_type = msg_type.strip().lower()
@@ -180,6 +204,10 @@ def classify_message(
     core_token = _strip_edge_punctuation(without_emoji).lower()
     if not core_token:
         return FilterDecision(category="invalid", reason="punctuation_only", normalized_text=trimmed_text)
+
+    enroll_target = _normalize_keyword(gray_enroll_keyword)
+    if enroll_target and _normalize_keyword(without_emoji) == enroll_target:
+        return FilterDecision(category="gray_enroll", reason="gray_allowlist_keyword", normalized_text=trimmed_text)
 
     if core_token in _INVALID_EXACT_TOKENS:
         return FilterDecision(category="invalid", reason="noise_or_greeting", normalized_text=trimmed_text)

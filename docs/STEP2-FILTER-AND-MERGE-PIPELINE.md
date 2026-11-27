@@ -12,7 +12,7 @@
 
 ## SQLite 表结构（`support_backend/schema.py` & `support_backend/db.py`）
 
-数据库路径由 `SUPPORT_DB_PATH` 指定（未设置时默认落在 `RELAY_LOG_PATH` 同目录的 `library-support.db`；systemd 环境为 `/var/lib/private/wechat-relay/library-support.db`，目录 `0700`、文件 `0600`，当前 `SCHEMA_VERSION=3`）：
+数据库路径由 `SUPPORT_DB_PATH` 指定（未设置时默认落在 `RELAY_LOG_PATH` 同目录的 `library-support.db`；systemd 环境为 `/var/lib/private/wechat-relay/library-support.db`，目录 `0700`、文件 `0600`，当前 `SCHEMA_VERSION=4`）：
 
 | 表名 | 核心字段 | 职责 |
 |---|---|---|
@@ -23,6 +23,7 @@
 | `staff_cases` | `case_id`, `account_id`, `reader_id`, `source_batch_id`, `source_event_seq`, `case_kind (staff_todo\|emergency)`, `status (open\|closed)`, `summary`, `latest_message`, `closed_at_utc`, `resolution_note` | 馆员待办与紧急事件记录，`open` 的 `staff_todo` 参与未结案件续接判定。 |
 | `staff_case_messages` | `item_id`, `case_id`, `batch_id`, `event_seq`, `sender_role`, `content` | 记录追加到未结待办上的读者补充消息及处理时间线。 |
 | `outbound_replies` | `reply_id`, `account_id`, `reader_id`, `trigger_kind`, `trigger_ref_id`, `content`, `delivery_mode`, `status`, `errcode`, `errmsg`, `duration_ms` | 审计每次真实发送（`sent` / `failed`）或影子记录（`shadow`）。 |
+| `auto_reply_allowlist` | `account_id`, `reader_id`, `source`, `created_at_utc`, `updated_at_utc` | 持久化通过环境变量配置的灰度口令自助加入自动回复白名单的读者。 |
 | `clarification_states` / `triage_runs` | `clarify_id`, `status`, `expires_at_epoch` / `run_id`, `stage_path`, `decision_*` | Step 3 单次澄清状态机与完整分诊审计（详见 [Step 3 文档](STEP3-TIER1-AND-TIER2-RAG.md)）。 |
 
 ---
@@ -33,9 +34,10 @@
 
 1. **`unsupported`**：`msg_type != "text"`（如微信菜单 `event:VIEW`、`subscribe`、图片/语音/链接等），或文本仅由一个或多个 URL 构成。
 2. **`invalid`**：空白文本、纯标点/装饰符、纯微信表情方括号/斜杠代码（如 `[微笑]`），或孤立寒暄/测试词（如 `你好`、`在吗`、`hi`、`test`、`1`）。包含实质提问的句子（如 `你好，请问几点关门`）仍归为 `question`。
-3. **`emergency`**：物理被困、人身安全、突发医疗、火警水患漏电或现场治安危机，同时排除 `储物柜`、`账号`、`借阅卡` 等非物理锁定误报。命中后立即回复与 `0. 联系我们.md` 对齐的预设紧急联系方式并创建 `staff_cases(case_kind='emergency')`。
-4. **`feedback`**：非紧急读者建议或表扬（如 `建议二楼增加插座`、`表扬工作人员`），且未包含系统报错、现场投诉或荐购词（`推荐购买新书` / `荐购` 归为 `question`）。命中后立即写入 `feedback_records` 并回复收件确认。
-5. **`question`**：其余所有有效文本（含短补充片段），进入调度管道。
+3. **`gray_enroll`**：仅当配置了非空 `SUPPORT_GRAY_ENROLL_KEYWORD` 时启用（未设置时默认关闭，代码中不硬编码口令）。整句匹配该口令（忽略首尾标点/引号/空格及微信表情）后原子写入 `auto_reply_allowlist` 并立即回执确认，不进入问答合批、不追加未结待办且不消耗澄清额度。
+4. **`emergency`**：物理被困、人身安全、突发医疗、火警水患漏电或现场治安危机，同时排除 `储物柜`、`账号`、`借阅卡` 等非物理锁定误报。命中后立即回复与 `0. 联系我们.md` 对齐的预设紧急联系方式并创建 `staff_cases(case_kind='emergency')`。
+5. **`feedback`**：非紧急读者建议或表扬（如 `建议二楼增加插座`、`表扬工作人员`），且未包含系统报错、现场投诉或荐购词（`推荐购买新书` / `荐购` 归为 `question`）。命中后立即写入 `feedback_records` 并回复收件确认。
+6. **`question`**：其余所有有效文本（含短补充片段），进入调度管道。
 
 **未结待办续接（`default_same_case_matcher`）**：批次就绪后，若同读者名下存在 `open` 状态 `staff_todo`，当新文本命中追问标记词（如 `还是不行`、`补充一下`、`学号`）、与原待办双字词重合度 `>= 2`，或处于 `30` 分钟（`1800s`）活跃窗口内的短补充（`<= 40` 字）且不匹配明确新话题词时，直接追加到该待办并停止自动回复，交由馆员处理。
 
@@ -52,7 +54,7 @@
    - **提交屏障**：仅当 `commit_batch_generation` 原子核对 `status='processing' AND generation=expected` 通过后才闭合批次并落库/发信，过期代次静默丢弃；达上限后置 `preempt_locked=1` 锁定当前批次完成答复，后续消息自动写入 `queued` 批次排队接力。
 2. **`SUPPORT_MERGE_ENABLED=true`（防抖合并模式，可选回退）**：
    - 首条 `question` 创建 `open` 批次（`flush_at = min(now + 3s, first + 10s)`）；截止前收到新文本重置 `3` 秒静默计时但不延长 `10` 秒上限，由单周期 `asyncio` 调度器统一到期冲刷。
-- **出站发信与灰度**：代码中 `SUPPORT_AUTO_REPLY_ENABLED` 默认 `false`（写 `status='shadow'`）。当前生产环境 `/etc/wechat-relay.env` 已启用 `SUPPORT_AUTO_REPLY_ENABLED=true` 并通过 `SUPPORT_AUTO_REPLY_ALLOWLIST` 限定仅白名单测试 OpenID 真实调用 `custom/send`，其余读者全流程记录 `shadow`。
+- **出站发信与灰度**：代码中 `SUPPORT_AUTO_REPLY_ENABLED` 默认 `false`（写 `status='shadow'`）。当前生产环境 `/etc/wechat-relay.env` 已启用 `SUPPORT_AUTO_REPLY_ENABLED=true` 并通过 `SUPPORT_AUTO_REPLY_ALLOWLIST` 限定仅白名单（含静态白名单与通过 `SUPPORT_GRAY_ENROLL_KEYWORD` 动态加入的 `auto_reply_allowlist` 记录）真实调用 `custom/send`，其余读者全流程记录 `shadow`。
 
 ---
 
@@ -60,6 +62,6 @@
 
 - `POST /relay/wechat`：校验 `wx_headers`、同步落盘 JSONL 与 SQLite，并异步调度 Filter/问答回复（返回 `{ok, accepted, duplicate, seq}`）。
 - `GET /relay/support/overview`：返回分类计数、活跃批次与各表统计（脱敏，不含 OpenID 与原文）。
-- `GET /relay/support/events`、`batches`、`feedbacks`、`cases`、`replies`：按 `limit=1..200` 及可选 `category` / `status` 检索结构化状态（Step 3 另增 `triage-runs` 与 `presets`）。
-- `POST /relay/support/cases`、`POST /relay/support/cases/{case_id}/close`：手工创建或结案馆员待办（结案后不再自动追加后续消息）。
+- `GET /relay/support/events`、`batches`、`feedbacks`、`cases`、`replies`、`allowlist`：按 `limit=1..200` 及可选 `category` / `status` 检索结构化状态（Step 3 另增 `triage-runs` 与 `presets`）。
+- `POST /relay/support/cases`、`POST /relay/support/cases/{case_id}/close`、`POST /relay/support/allowlist/remove`：手工创建/结案馆员待办或移出动态灰度白名单。
 - `POST /relay/support/flush-due`：手动冲刷到期防抖批次。

@@ -87,7 +87,7 @@ flowchart LR
 
 - **回调确认与异步发送**：微信云托管 `/wechat` 在 5 秒回调窗口内同步转发至自建服务器 `/relay/wechat`（默认超时 `3.0` 秒、fail-open）并立即返回 `success`；自建后端同步完成 JSONL 与 SQLite 落盘后，在后台异步执行分诊、RAG 检索和发信。[微信回调时限](https://developers.weixin.qq.com/doc/service/guide/product/message/Receiving_standard_messages.md)
 - **即时抢占与可选防抖合并**：按 `(account_id, MsgId)` 幂等去重。依据线上读者多为单条提问的分布特征，默认开启即时抢占模式（`SUPPORT_MERGE_ENABLED=false`）：首条 `question` 立刻启动处理；提交前同读者再发新消息且未超上限（默认最多抢占 `2` 次即单轮合入 `3` 条、最长 `10` 秒）时，追加文本并取消旧任务重跑，通过 `generation` 提交屏障防重发，超限后锁批并将后续消息排入 `queued` 队列。传统「静默 `3` 秒 / 最长 `10` 秒」防抖合并保留为 `SUPPORT_MERGE_ENABLED=true` 可选开关。
-- **直连回发与灰度控制**：已取消云托管侧发信，改为自建后端直连微信 `custom/send`（单条消息上限 `1800` UTF-8 字节），并已完成真机送达验收。线上通过 `SUPPORT_AUTO_REPLY_ENABLED` 与 `SUPPORT_AUTO_REPLY_ALLOWLIST` 控制灰度：白名单内 OpenID 实发，其余读者走完完整流程并以 `status='shadow'` 写入 `outbound_replies`。若微信接口报错或触达发送限额，后端记录错误码后由馆员在公众号后台继续回复。
+- **直连回发与灰度控制**：已取消云托管侧发信，改为自建后端直连微信 `custom/send`（单条消息上限 `1800` UTF-8 字节），并已完成真机送达验收。线上通过 `SUPPORT_AUTO_REPLY_ENABLED` 与 `SUPPORT_AUTO_REPLY_ALLOWLIST` 控制灰度：白名单内 OpenID（含静态环境变量白名单与通过 `SUPPORT_GRAY_ENROLL_KEYWORD` 私信口令动态入组的持久化读者；口令仅由服务端环境变量配置，未设置时默认关闭）实发，其余读者走完完整流程并以 `status='shadow'` 写入 `outbound_replies`。若微信接口报错或触达发送限额，后端记录错误码后由馆员在公众号后台继续回复。
 
 ### 馆员处理
 

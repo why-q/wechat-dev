@@ -18,7 +18,11 @@ import relay_receiver
 from support_backend import (
     EMERGENCY_CONTACT_REPLY,
     FEEDBACK_RECEIVED_REPLY,
+    GRAY_ENROLL_ADDED_REPLY,
+    GRAY_ENROLL_ALREADY_REPLY,
+    PresetCatalog,
     SupportPipeline,
+    SupportResponder,
     SupportStore,
     classify_message,
 )
@@ -136,6 +140,24 @@ class FilterClassificationTests(unittest.TestCase):
 
         cooling_q = classify_message("text", "白天图书馆好热啊，能不能调低一点空调？")
         self.assertEqual(cooling_q.category, "question")
+
+    def test_gray_enroll_keyword_classification_and_default_disabled(self):
+        test_kw = "灰度测试暗号"
+        # Disabled by default when no keyword is configured.
+        self.assertEqual(classify_message("text", test_kw).category, "question")
+        self.assertEqual(classify_message("text", test_kw, gray_enroll_keyword="").category, "question")
+
+        for text in (test_kw, f"  {test_kw}！ ", f"「{test_kw}」", f"[微笑] {test_kw}。"):
+            decision = classify_message("text", text, gray_enroll_keyword=test_kw)
+            self.assertEqual(
+                (decision.category, decision.reason),
+                ("gray_enroll", "gray_allowlist_keyword"),
+                f"expected gray_enroll for {text!r}",
+            )
+
+        for non_command in (f"请问{test_kw}是什么意思", f"{test_kw}怎么用", "灰度 测试暗号"):
+            decision = classify_message("text", non_command, gray_enroll_keyword=test_kw)
+            self.assertEqual(decision.category, "question", f"unexpected enroll for {non_command!r}")
 
 
 class SupportStoreAndMergeTests(unittest.TestCase):
@@ -774,6 +796,286 @@ class AsyncPipelineAndHttpTests(unittest.TestCase):
         asyncio.run(run_http())
         self.assertEqual(len(sent_calls), 1)
         self.assertEqual(sent_calls[0][0], "o_tester_vip")
+
+    def test_gray_enroll_keyword_persists_allowlist_and_unlocks_live_replies(self):
+        sent_calls: list[tuple[str, str]] = []
+
+        def fake_send(to_user: str, content: str) -> dict[str, object]:
+            sent_calls.append((to_user, content))
+            return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 6, "mode": "direct_https"}
+
+        test_kw = "灰度测试暗号"
+        catalog = PresetCatalog.from_corpus_dir(Path("rag-poc/corpus"))
+        store1 = SupportStore(self.db_path, merge_enabled=False)
+        try:
+            responder1 = SupportResponder(store=store1, preset_catalog=catalog)
+            pipeline1 = SupportPipeline(
+                store1,
+                send_text_fn=fake_send,
+                auto_reply_enabled=True,
+                auto_reply_allowlist=["o_static_admin"],
+                gray_enroll_keyword=test_kw,
+                triage_fn=responder1.triage,
+            )
+            pipeline1.commit_handler = lambda outcome, plan: responder1.apply_committed_plan(
+                outcome, plan, deliver_reply_fn=pipeline1.deliver_reply
+            )
+
+            async def run_phase1():
+                await pipeline1.start()
+                try:
+                    # Before enrolling, o_guest stays in shadow mode.
+                    p_before = {
+                        "to_user": "gh_lib",
+                        "from_user": "o_guest",
+                        "msg_type": "text",
+                        "msg_id": "g1",
+                        "content": "开馆时间？",
+                    }
+                    res_before = pipeline1.ingest_sync(p_before)
+                    await pipeline1.process_ingest_side_effects(res_before, p_before)
+                    await pipeline1.wait_for_idle(timeout=2.0)
+
+                    store1.create_staff_case(
+                        account_id="gh_lib",
+                        reader_id="o_guest",
+                        summary="读者储物柜故障",
+                        latest_message="储物柜打不开",
+                    )
+                    store1.set_active_clarification(
+                        account_id="gh_lib",
+                        reader_id="o_guest",
+                        original_batch_id=None,
+                        original_question="预约",
+                        clarify_prompt="请问预约什么？",
+                    )
+
+                    for mid, reader, content in [
+                        ("g2", "o_guest", f"「{test_kw}」"),
+                        ("g2", "o_guest", f"「{test_kw}」"),  # duplicate MsgId retry ignored
+                        ("g3", "o_guest", f"{test_kw}！"),
+                        ("g4", "o_static_admin", test_kw),
+                    ]:
+                        payload = {
+                            "to_user": "gh_lib",
+                            "from_user": reader,
+                            "msg_type": "text",
+                            "msg_id": mid,
+                            "content": content,
+                        }
+                        res = pipeline1.ingest_sync(payload)
+                        await pipeline1.process_ingest_side_effects(res, payload)
+                    await pipeline1.wait_for_idle(timeout=2.0)
+
+                    # Backdoor command must neither append to open staff case nor consume active clarification.
+                    open_cases = store1.list_staff_cases(status="open")
+                    self.assertEqual(len(open_cases[0]["messages"]), 1)
+                    self.assertIsNotNone(store1.get_active_clarification("gh_lib", "o_guest"))
+                    store1.close_staff_case(open_cases[0]["case_id"], resolution_note="测试结案")
+
+                    for mid, reader, content in [
+                        ("g5", "o_guest", "开馆时间？"),
+                        ("g6", "o_bystander", "开馆时间？"),
+                    ]:
+                        payload = {
+                            "to_user": "gh_lib",
+                            "from_user": reader,
+                            "msg_type": "text",
+                            "msg_id": mid,
+                            "content": content,
+                        }
+                        res = pipeline1.ingest_sync(payload)
+                        await pipeline1.process_ingest_side_effects(res, payload)
+                    await pipeline1.wait_for_idle(timeout=2.0)
+                finally:
+                    await pipeline1.stop()
+
+            asyncio.run(run_phase1())
+            self.assertEqual(
+                sent_calls,
+                [
+                    ("o_guest", GRAY_ENROLL_ADDED_REPLY),
+                    ("o_guest", GRAY_ENROLL_ALREADY_REPLY),
+                    ("o_static_admin", GRAY_ENROLL_ALREADY_REPLY),
+                    ("o_guest", catalog.get_by_id("preset_opening_hours").body),
+                ],
+            )
+        finally:
+            store1.close()
+
+        # Re-open SQLite across restart and verify dynamic allowlist survives.
+        sent_after_restart: list[tuple[str, str]] = []
+
+        def fake_send_2(to_user: str, content: str) -> dict[str, object]:
+            sent_after_restart.append((to_user, content))
+            return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 5, "mode": "direct_https"}
+
+        store2 = SupportStore(self.db_path, merge_enabled=False)
+        try:
+            responder2 = SupportResponder(store=store2, preset_catalog=catalog)
+            pipeline2 = SupportPipeline(
+                store2,
+                send_text_fn=fake_send_2,
+                auto_reply_enabled=True,
+                auto_reply_allowlist=["o_static_admin"],
+                triage_fn=responder2.triage,
+            )
+            pipeline2.commit_handler = lambda outcome, plan: responder2.apply_committed_plan(
+                outcome, plan, deliver_reply_fn=pipeline2.deliver_reply
+            )
+
+            async def run_phase2():
+                await pipeline2.start()
+                try:
+                    p = {
+                        "to_user": "gh_lib",
+                        "from_user": "o_guest",
+                        "msg_type": "text",
+                        "msg_id": "g7",
+                        "content": "图书续借？",
+                    }
+                    res = pipeline2.ingest_sync(p)
+                    await pipeline2.process_ingest_side_effects(res, p)
+                    await pipeline2.wait_for_idle(timeout=2.0)
+                finally:
+                    await pipeline2.stop()
+
+            asyncio.run(run_phase2())
+            self.assertEqual(
+                sent_after_restart,
+                [("o_guest", catalog.get_by_id("preset_book_renewal").body)],
+            )
+        finally:
+            store2.close()
+
+    def test_http_gray_enroll_overview_list_and_remove(self):
+        token = "gray-enroll-http-token"
+        auth = {"authorization": f"Bearer {token}"}
+        sent_calls: list[tuple[str, str]] = []
+        test_kw = "test-gray-passphrase"
+
+        def fake_send(to_user: str, content: str) -> dict[str, object]:
+            sent_calls.append((to_user, content))
+            return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 7, "mode": "direct_https"}
+
+        async def run_default_disabled():
+            with (
+                patch.object(relay_receiver, "_AUTH_TOKEN", token),
+                patch.object(relay_receiver, "_LOG_PATH", self.log_path),
+                patch.object(relay_receiver, "_SUPPORT_DB_PATH_RAW", str(self.db_path)),
+                patch.object(relay_receiver, "_SUPPORT_CORPUS_DIR_RAW", "rag-poc/corpus"),
+                patch.object(relay_receiver, "_SUPPORT_INDEX_DIR_RAW", str(Path(self.tmpdir.name) / "no_index")),
+                patch.object(relay_receiver, "_SUPPORT_DECISION_BASE_URL", ""),
+                patch.object(relay_receiver, "_SUPPORT_MERGE_ENABLED", False),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ENABLED", True),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ALLOWLIST", frozenset({"o_admin"})),
+            ):
+                async with relay_receiver._lifespan(relay_receiver.app):
+                    self.assertEqual(relay_receiver._SUPPORT_GRAY_ENROLL_KEYWORD, "")
+                    _, ov_text = await _async_asgi_request(
+                        relay_receiver.app, "GET", "/relay/support/overview", headers=auth
+                    )
+                    ov = json.loads(ov_text)
+                    self.assertFalse(ov["gray_enroll_enabled"])
+                    self.assertEqual(ov["dynamic_allowlist_count"], 0)
+
+        asyncio.run(run_default_disabled())
+
+        async def run_http():
+            with (
+                patch.object(relay_receiver, "_AUTH_TOKEN", token),
+                patch.object(relay_receiver, "_LOG_PATH", self.log_path),
+                patch.object(relay_receiver, "_SUPPORT_DB_PATH_RAW", str(self.db_path)),
+                patch.object(relay_receiver, "_SUPPORT_CORPUS_DIR_RAW", "rag-poc/corpus"),
+                patch.object(relay_receiver, "_SUPPORT_INDEX_DIR_RAW", str(Path(self.tmpdir.name) / "no_index")),
+                patch.object(relay_receiver, "_SUPPORT_DECISION_BASE_URL", ""),
+                patch.object(relay_receiver, "_SUPPORT_MERGE_ENABLED", False),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ENABLED", True),
+                patch.object(relay_receiver, "_SUPPORT_AUTO_REPLY_ALLOWLIST", frozenset({"o_admin"})),
+                patch.object(relay_receiver, "_SUPPORT_GRAY_ENROLL_KEYWORD", test_kw),
+                patch.object(relay_receiver._DIRECT_CLIENT, "send_text", side_effect=fake_send),
+            ):
+                async with relay_receiver._lifespan(relay_receiver.app):
+                    with self.assertLogs("uvicorn.error", level="INFO") as captured:
+                        for mid, reader, content in [
+                            ("h1", "o_tester_new", test_kw),
+                            ("h2", "o_tester_new", "开馆时间？"),
+                        ]:
+                            code, _ = await _async_asgi_request(
+                                relay_receiver.app,
+                                "POST",
+                                "/relay/wechat",
+                                body=json.dumps(
+                                    {
+                                        "msg_type": "text",
+                                        "msg_id": mid,
+                                        "from_user": reader,
+                                        "to_user": "gh_lib",
+                                        "content": content,
+                                    },
+                                    ensure_ascii=False,
+                                ).encode("utf-8"),
+                                headers=auth,
+                            )
+                            self.assertEqual(code, 200)
+                        await relay_receiver.app.state.support_pipeline.wait_for_idle(timeout=2.0)
+
+                    logs_joined = "\n".join(captured.output)
+                    self.assertNotIn("o_tester_new", logs_joined)
+                    self.assertNotIn(test_kw, logs_joined)
+
+                    _, ov_text = await _async_asgi_request(
+                        relay_receiver.app, "GET", "/relay/support/overview", headers=auth
+                    )
+                    self.assertNotIn("o_tester_new", ov_text)
+                    self.assertNotIn(test_kw, ov_text)
+                    ov = json.loads(ov_text)
+                    self.assertEqual(ov["auto_reply_allowlist_count"], 2)
+                    self.assertEqual(ov["dynamic_allowlist_count"], 1)
+                    self.assertTrue(ov["gray_enroll_enabled"])
+                    self.assertEqual(ov["inbound_categories"]["gray_enroll"], 1)
+
+                    _, al_text = await _async_asgi_request(
+                        relay_receiver.app, "GET", "/relay/support/allowlist", headers=auth
+                    )
+                    al = json.loads(al_text)
+                    self.assertEqual(al["static_count"], 1)
+                    self.assertEqual(al["count"], 1)
+                    self.assertEqual(al["entries"][0]["reader_id"], "o_tester_new")
+
+                    rm_code, rm_text = await _async_asgi_request(
+                        relay_receiver.app,
+                        "POST",
+                        "/relay/support/allowlist/remove",
+                        body=json.dumps({"reader_id": "o_tester_new"}).encode("utf-8"),
+                        headers=auth,
+                    )
+                    self.assertEqual(rm_code, 200)
+                    self.assertEqual(json.loads(rm_text), {"removed": 1})
+
+                    # Once removed, subsequent messages go back to shadow mode.
+                    code3, _ = await _async_asgi_request(
+                        relay_receiver.app,
+                        "POST",
+                        "/relay/wechat",
+                        body=json.dumps(
+                            {
+                                "msg_type": "text",
+                                "msg_id": "h3",
+                                "from_user": "o_tester_new",
+                                "to_user": "gh_lib",
+                                "content": "开馆时间？",
+                            },
+                            ensure_ascii=False,
+                        ).encode("utf-8"),
+                        headers=auth,
+                    )
+                    self.assertEqual(code3, 200)
+                    await relay_receiver.app.state.support_pipeline.wait_for_idle(timeout=2.0)
+
+        asyncio.run(run_http())
+        self.assertEqual(len(sent_calls), 2)
+        self.assertEqual(sent_calls[0][1], GRAY_ENROLL_ADDED_REPLY)
 
 
 if __name__ == "__main__":

@@ -33,7 +33,7 @@
 - `SUPPORT_DECISION_BASE_URL` / `SUPPORT_DECISION_API_KEY` / `SUPPORT_DECISION_MODEL`（默认 `decision-model-preview`）/ `SUPPORT_DECISION_TIMEOUT_SECONDS`（默认 `3.0`）
 - `SUPPORT_CORPUS_DIR`（代码默认 `rag-poc/corpus`，systemd 指定 `/srv/wechat-relay/rag-poc/corpus`）、`SUPPORT_INDEX_DIR`（代码默认 `rag-poc/index_v2`，systemd 指定 `/srv/wechat-relay/rag-poc/index_v2`）
 - `SUPPORT_PRESET_MIN_CONFIDENCE`（默认 `0.65`）、`SUPPORT_LONG_ANSWER_CHARS`（默认 `220`）
-- `SUPPORT_AUTO_REPLY_ENABLED`（代码默认 `false`，线上环境开启 `true`）与 `SUPPORT_AUTO_REPLY_ALLOWLIST`（逗号分隔 OpenID 列表；非空时仅白名单用户实发 `custom/send`，其余读者记为 `status='shadow'`）
+- `SUPPORT_AUTO_REPLY_ENABLED`（代码默认 `false`，线上环境开启 `true`）、`SUPPORT_AUTO_REPLY_ALLOWLIST`（逗号分隔 OpenID 列表；非空时启用白名单门控，放行静态列表及 SQLite `auto_reply_allowlist` 动态入组读者）与 `SUPPORT_GRAY_ENROLL_KEYWORD`（私信自助加入白名单口令，未设置或置空时默认关闭，不硬编码口令）
 - `SUPPORT_TIER2_ENABLED`（默认 `true`）、`SUPPORT_TIER2_TOP_K`（默认 `4`）、`SUPPORT_TIER2_MIN_SCORE`（默认 `0.2`）
 - `RAG_NLTK_DATA_DIR`：systemd 下设为 `/var/lib/private/wechat-relay/nltk_data`，确保 `nltk.pathsec` 在 `DynamicUser=yes` 下满足单硬链与属主一致。
 

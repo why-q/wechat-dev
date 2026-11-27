@@ -276,6 +276,7 @@ class SupportStore:
                 staff_case_id: int | None = None
                 preempted_batch_id: int | None = None
                 queued_behind_batch_id: int | None = None
+                allowlist_enrolled: bool | None = None
 
                 if decision.category == "question" and reader_id:
                     if self.merge_enabled:
@@ -318,6 +319,15 @@ class SupportStore:
                         now_utc=now_utc,
                     )
 
+                elif decision.category == "gray_enroll" and reader_id:
+                    allowlist_enrolled = self._enroll_allowlist_locked(
+                        account_id=account_id,
+                        reader_id=reader_id,
+                        source="keyword",
+                        now_epoch=now_epoch,
+                        now_utc=now_utc,
+                    )
+
             self._enforce_permissions()
             return IngestResult(
                 duplicate=False,
@@ -330,6 +340,7 @@ class SupportStore:
                 pre_flushed=tuple(pre_flushed),
                 preempted_batch_id=preempted_batch_id,
                 queued_behind_batch_id=queued_behind_batch_id,
+                allowlist_enrolled=allowlist_enrolled,
             )
 
     def _record_feedback_locked(
@@ -401,6 +412,122 @@ class SupportStore:
             (staff_case_id, seq),
         )
         return staff_case_id
+
+    def _enroll_allowlist_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        source: str,
+        now_epoch: float,
+        now_utc: str,
+    ) -> bool:
+        acct = account_id or "default"
+        existing = self._conn.execute(
+            "SELECT 1 FROM auto_reply_allowlist WHERE account_id = ? AND reader_id = ?",
+            (acct, reader_id),
+        ).fetchone()
+        if existing is None:
+            self._conn.execute(
+                """
+                INSERT INTO auto_reply_allowlist(
+                    account_id, reader_id, source,
+                    created_at_epoch, created_at_utc, updated_at_epoch, updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (acct, reader_id, source, now_epoch, now_utc, now_epoch, now_utc),
+            )
+            return True
+        self._conn.execute(
+            """
+            UPDATE auto_reply_allowlist
+            SET source = ?, updated_at_epoch = ?, updated_at_utc = ?
+            WHERE account_id = ? AND reader_id = ?
+            """,
+            (source, now_epoch, now_utc, acct, reader_id),
+        )
+        return False
+
+    def enroll_allowlist(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        source: str = "keyword",
+        now_epoch: float | None = None,
+    ) -> bool:
+        """Persist a dynamic allowlist reader and return True iff newly added."""
+        clean_reader = reader_id.strip()
+        if not clean_reader:
+            raise ValueError("reader_id must be non-empty")
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                return self._enroll_allowlist_locked(
+                    account_id=account_id.strip() or "default",
+                    reader_id=clean_reader,
+                    source=source,
+                    now_epoch=now_val,
+                    now_utc=now_utc,
+                )
+
+    def is_allowlisted(self, account_id: str, reader_id: str) -> bool:
+        """Return whether `(account_id, reader_id)` is present in the dynamic allowlist."""
+        if not reader_id:
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT 1 FROM auto_reply_allowlist
+                WHERE account_id = ? AND reader_id = ?
+                LIMIT 1
+                """,
+                (account_id or "default", reader_id),
+            ).fetchone()
+            return row is not None
+
+    def allowlist_reader_ids(self) -> frozenset[str]:
+        """Return distinct reader IDs enrolled in the dynamic allowlist."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT reader_id FROM auto_reply_allowlist"
+            ).fetchall()
+            return frozenset(str(row["reader_id"]) for row in rows)
+
+    def list_allowlist(self, *, limit: int = 200) -> list[dict[str, Any]]:
+        """List dynamic allowlist entries ordered by most recent enrollment/refresh."""
+        bounded = max(1, min(limit, 200))
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT account_id, reader_id, source, created_at_utc, updated_at_utc
+                FROM auto_reply_allowlist
+                ORDER BY updated_at_epoch DESC, reader_id ASC
+                LIMIT ?
+                """,
+                (bounded,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def remove_allowlist(self, reader_id: str, *, account_id: str | None = None) -> int:
+        """Remove a reader from the dynamic allowlist and return deleted row count."""
+        clean_reader = reader_id.strip()
+        if not clean_reader:
+            return 0
+        with self._lock:
+            with self._conn:
+                if account_id is not None and account_id.strip():
+                    cursor = self._conn.execute(
+                        "DELETE FROM auto_reply_allowlist WHERE account_id = ? AND reader_id = ?",
+                        (account_id.strip(), clean_reader),
+                    )
+                else:
+                    cursor = self._conn.execute(
+                        "DELETE FROM auto_reply_allowlist WHERE reader_id = ?",
+                        (clean_reader,),
+                    )
+                return int(cursor.rowcount)
 
     def _append_batch_message_locked(
         self,
@@ -1433,6 +1560,9 @@ class SupportStore:
                     "SELECT COUNT(*) FROM clarification_states WHERE status = 'awaiting_reply'"
                 ).fetchone()[0]
             )
+            dynamic_allowlist_count = int(
+                self._conn.execute("SELECT COUNT(*) FROM auto_reply_allowlist").fetchone()[0]
+            )
             return {
                 "schema_version": SCHEMA_VERSION,
                 "merge_enabled": self.merge_enabled,
@@ -1448,6 +1578,7 @@ class SupportStore:
                 "multi_message_batches": multi_message_batches,
                 "open_staff_cases": open_cases,
                 "active_clarifications": active_clarifications,
+                "dynamic_allowlist_count": dynamic_allowlist_count,
                 "feedback_count": feedback_total,
                 "triage_stages": triage_stages,
                 "outbound_replies": reply_statuses,

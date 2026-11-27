@@ -25,8 +25,11 @@ from .decision_client import (
     build_systemone_url,
 )
 from .filters import (
+    DEFAULT_GRAY_ENROLL_KEYWORD,
     EMERGENCY_CONTACT_REPLY,
     FEEDBACK_RECEIVED_REPLY,
+    GRAY_ENROLL_ADDED_REPLY,
+    GRAY_ENROLL_ALREADY_REPLY,
     FilterDecision,
     classify_message,
     default_same_case_matcher,
@@ -59,6 +62,7 @@ __all__ = [
     "DEFAULT_CLARIFY_QUESTION",
     "DEFAULT_DECISION_MODEL",
     "DEFAULT_DECISION_TIMEOUT_SECONDS",
+    "DEFAULT_GRAY_ENROLL_KEYWORD",
     "DEFAULT_LONG_ANSWER_CHARS",
     "DEFAULT_MAX_PREEMPTS",
     "DEFAULT_MAX_WAIT_SECONDS",
@@ -74,6 +78,8 @@ __all__ = [
     "FEEDBACK_RECEIVED_REPLY",
     "FilterDecision",
     "FlushOutcome",
+    "GRAY_ENROLL_ADDED_REPLY",
+    "GRAY_ENROLL_ALREADY_REPLY",
     "IngestResult",
     "KnowledgeError",
     "PresetCatalog",

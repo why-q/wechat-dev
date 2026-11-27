@@ -9,7 +9,7 @@ from typing import Any
 
 from .filters import FilterDecision, default_same_case_matcher
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utc_iso(epoch_seconds: float) -> str:
@@ -158,6 +158,7 @@ class IngestResult:
     pre_flushed: tuple[FlushOutcome, ...] = ()
     preempted_batch_id: int | None = None
     queued_behind_batch_id: int | None = None
+    allowlist_enrolled: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,5 +363,16 @@ CREATE TABLE IF NOT EXISTS triage_runs (
     staff_case_id INTEGER REFERENCES staff_cases(case_id),
     created_at_epoch REAL NOT NULL,
     created_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS auto_reply_allowlist (
+    account_id TEXT NOT NULL,
+    reader_id TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'keyword',
+    created_at_epoch REAL NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_epoch REAL NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    PRIMARY KEY (account_id, reader_id)
 );
 """
