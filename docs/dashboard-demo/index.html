@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f7f6f0">
+  <meta name="theme-color" content="#f3f1e9">
   <title>服务总览｜图书馆智能客服</title>
   <link rel="stylesheet" href="dashboard.css">
 </head>
@@ -22,210 +22,354 @@
     </header>
 
     <main id="main-content">
-      <section class="page-head" aria-labelledby="page-title">
-        <div>
-          <p class="eyebrow">运营台 <span aria-hidden="true">/</span> 管理员</p>
+      <section class="page-head page-head--compact" aria-labelledby="page-title">
+        <div class="page-title-group">
           <h1 id="page-title">服务总览</h1>
-          <p class="lede">查看入站消息、Filter 分类、问答队列与回复状态。</p>
+          <span class="updated-at">近 7 日 11/21–11/27</span>
         </div>
         <div class="page-meta">
           <span class="demo-tag">示例数据</span>
-          <span class="updated-at">数据快照 2026年11月27日 16:20</span>
+          <span class="updated-at">快照 2026-11-27 16:20</span>
         </div>
       </section>
 
       <section class="metric-strip" aria-label="关键指标">
         <article class="metric">
-          <h2 class="metric-label">近 7 日收到消息</h2>
-          <p class="metric-value">316</p>
-          <p class="metric-note">条 · 11月21日至27日 · 按 Filter 分类</p>
+          <div class="metric-top">
+            <h2 class="metric-label">7日入站</h2>
+            <span class="metric-delta">+11.2%</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">316<span class="metric-unit">条</span></p>
+            <svg class="metric-spark" viewBox="0 0 64 24" aria-hidden="true">
+              <polygon class="svg-area" points="2,18.4 12,12.6 22,10.7 32,15.2 42,6.9 52,4.9 62,10.1 62,22 2,22" />
+              <polyline class="svg-line" points="2,18.4 12,12.6 22,10.7 32,15.2 42,6.9 52,4.9 62,10.1" />
+              <circle cx="62" cy="10.1" r="2.3" fill="var(--ink)" />
+            </svg>
+          </div>
+          <p class="metric-note">日均 45.1 · 今日 47</p>
         </article>
+
         <article class="metric">
-          <h2 class="metric-label">未结问答批次</h2>
-          <p class="metric-value">21</p>
-          <p class="metric-note">批 · 待处理 12 · 处理中 6 · 已排队 3</p>
+          <div class="metric-top">
+            <h2 class="metric-label">今日回复</h2>
+            <span class="metric-delta">79.1% 实发</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">43<span class="metric-unit">条</span></p>
+          </div>
+          <div class="micro-bar" aria-hidden="true">
+            <span class="c-green" style="--w: 79.1%"></span>
+            <span class="c-ochre" style="--w: 16.3%"></span>
+            <span class="c-rust" style="--w: 4.7%"></span>
+          </div>
+          <p class="metric-note">实发34 · 影子7 · 失败2</p>
         </article>
+
         <article class="metric">
-          <h2 class="metric-label">未结馆员待办</h2>
-          <p class="metric-value">6</p>
-          <p class="metric-note">个普通待办 · 截至 2026年11月27日 16:20</p>
+          <div class="metric-top">
+            <h2 class="metric-label">未结批次</h2>
+            <span class="metric-delta">自动 91.8%</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">21<span class="metric-unit">批</span></p>
+          </div>
+          <div class="micro-bar" aria-hidden="true">
+            <span class="c-teal" style="--w: 57.1%"></span>
+            <span class="c-green" style="--w: 28.6%"></span>
+            <span class="c-ochre" style="--w: 14.3%"></span>
+          </div>
+          <p class="metric-note">待处理12 · 处理6 · 排队3</p>
         </article>
+
         <article class="metric">
-          <h2 class="metric-label">当日回复记录</h2>
-          <p class="metric-value">43</p>
-          <p class="metric-note">条 · 11月27日 00:00–16:20</p>
+          <div class="metric-top">
+            <h2 class="metric-label">未结待办</h2>
+            <span class="metric-delta metric-delta--warn">含 1 紧急</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">7<span class="metric-unit">项</span></p>
+          </div>
+          <div class="micro-bar" aria-hidden="true">
+            <span class="c-rust" style="--w: 14.3%"></span>
+            <span class="c-ink" style="--w: 85.7%"></span>
+          </div>
+          <p class="metric-note">普通待办 6 · 紧急事件 1</p>
         </article>
       </section>
 
-      <div class="dashboard-grid" aria-label="服务运营详情">
-        <section class="panel panel--traffic" aria-labelledby="traffic-title">
+      <div class="dashboard-grid" aria-label="运营图表">
+        <!-- Row 1: 7-day trend (5) + Today hourly rhythm (4) + Reply Donut (3) -->
+        <section class="panel panel--span-5 panel--trend-wide" aria-labelledby="traffic-title">
           <div class="panel-head">
-            <div>
-              <p class="eyebrow">入站趋势</p>
-              <h2 id="traffic-title">每日收到消息</h2>
-              <p class="panel-note">入站消息条数 · 近 7 日（11月21日至27日）</p>
-            </div>
-            <span class="period-chip">合计 316 条</span>
+            <h2 id="traffic-title">近 7 日入站趋势</h2>
+            <span class="period-chip">合计 316 · 均 45.1/日</span>
           </div>
           <figure class="chart-figure">
-            <ol class="traffic-chart" aria-label="近七日每日收到的入站消息数，共316条">
-              <li class="chart-row">
-                <span class="chart-day">周六 21日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 56.7%"></span></span>
-                <span class="chart-count">34 <span>条</span></span>
-              </li>
-              <li class="chart-row">
-                <span class="chart-day">周日 22日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 71.7%"></span></span>
-                <span class="chart-count">43 <span>条</span></span>
-              </li>
-              <li class="chart-row">
-                <span class="chart-day">周一 23日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 76.7%"></span></span>
-                <span class="chart-count">46 <span>条</span></span>
-              </li>
-              <li class="chart-row">
-                <span class="chart-day">周二 24日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 65%"></span></span>
-                <span class="chart-count">39 <span>条</span></span>
-              </li>
-              <li class="chart-row">
-                <span class="chart-day">周三 25日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 86.7%"></span></span>
-                <span class="chart-count">52 <span>条</span></span>
-              </li>
-              <li class="chart-row">
-                <span class="chart-day">周四 26日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 91.7%"></span></span>
-                <span class="chart-count">55 <span>条</span></span>
-              </li>
-              <li class="chart-row">
-                <span class="chart-day">周五 27日</span>
-                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 78.3%"></span></span>
-                <span class="chart-count">47 <span>条</span></span>
-              </li>
-            </ol>
-            <figcaption class="chart-caption">横条长度按消息条数比例展示，参考上限为 60 条。</figcaption>
+            <svg class="chart-svg" viewBox="0 0 360 148" role="img" aria-label="近7日每日入站消息趋势：21日34条，22日43条，23日46条，24日39条，25日52条，26日55条，27日47条">
+              <line class="svg-grid" x1="28" y1="18" x2="348" y2="18" />
+              <line class="svg-grid" x1="28" y1="52" x2="348" y2="52" />
+              <line class="svg-grid" x1="28" y1="86" x2="348" y2="86" />
+              <line class="svg-axis" x1="28" y1="120" x2="348" y2="120" />
+              <line class="svg-avg" x1="28" y1="43.3" x2="348" y2="43.3" />
+
+              <text class="svg-label" x="22" y="21" text-anchor="end">60</text>
+              <text class="svg-label" x="22" y="55" text-anchor="end">40</text>
+              <text class="svg-label" x="22" y="89" text-anchor="end">20</text>
+              <text class="svg-label" x="22" y="123" text-anchor="end">0</text>
+
+              <rect class="svg-bar" x="41" y="62.2" width="20" height="57.8" rx="1.5" />
+              <rect class="svg-bar" x="87" y="46.9" width="20" height="73.1" rx="1.5" />
+              <rect class="svg-bar" x="132" y="41.8" width="20" height="78.2" rx="1.5" />
+              <rect class="svg-bar" x="178" y="53.7" width="20" height="66.3" rx="1.5" />
+              <rect class="svg-bar" x="224" y="31.6" width="20" height="88.4" rx="1.5" />
+              <rect class="svg-bar--peak" x="269" y="26.5" width="20" height="93.5" rx="1.5" opacity="0.24" />
+              <rect class="svg-bar" x="315" y="40.1" width="20" height="79.9" rx="1.5" />
+
+              <polygon class="svg-area" points="51,62.2 97,46.9 142,41.8 188,53.7 234,31.6 279,26.5 325,40.1 325,120 51,120" />
+              <polyline class="svg-line" points="51,62.2 97,46.9 142,41.8 188,53.7 234,31.6 279,26.5 325,40.1" />
+
+              <circle class="svg-dot" cx="51" cy="62.2" r="2.8" />
+              <circle class="svg-dot" cx="97" cy="46.9" r="2.8" />
+              <circle class="svg-dot" cx="142" cy="41.8" r="2.8" />
+              <circle class="svg-dot" cx="188" cy="53.7" r="2.8" />
+              <circle class="svg-dot" cx="234" cy="31.6" r="2.8" />
+              <circle class="svg-dot--peak" cx="279" cy="26.5" r="3.6" />
+              <circle class="svg-dot" cx="325" cy="40.1" r="2.8" />
+
+              <text class="svg-val" x="51" y="55" text-anchor="middle">34</text>
+              <text class="svg-val" x="97" y="40" text-anchor="middle">43</text>
+              <text class="svg-val" x="142" y="35" text-anchor="middle">46</text>
+              <text class="svg-val" x="188" y="47" text-anchor="middle">39</text>
+              <text class="svg-val" x="234" y="25" text-anchor="middle">52</text>
+              <text class="svg-val svg-val--peak" x="279" y="19" text-anchor="middle">55</text>
+              <text class="svg-val" x="325" y="33" text-anchor="middle">47</text>
+
+              <text class="svg-label" x="51" y="136" text-anchor="middle">21六</text>
+              <text class="svg-label" x="97" y="136" text-anchor="middle">22日</text>
+              <text class="svg-label" x="142" y="136" text-anchor="middle">23一</text>
+              <text class="svg-label" x="188" y="136" text-anchor="middle">24二</text>
+              <text class="svg-label" x="234" y="136" text-anchor="middle">25三</text>
+              <text class="svg-label" x="279" y="136" text-anchor="middle">26四</text>
+              <text class="svg-label" x="325" y="136" text-anchor="middle">27五</text>
+            </svg>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="swatch c-green"></span>每日入站</span>
+              <span class="legend-item"><span class="swatch swatch--line"></span>7日均值 45.1</span>
+              <span class="legend-item"><span class="swatch c-ink"></span>峰值 26日 (55)</span>
+            </div>
           </figure>
         </section>
 
-        <section class="panel panel--outcomes" aria-labelledby="outcomes-title">
+        <section class="panel panel--span-4" aria-labelledby="hourly-title">
           <div class="panel-head">
-            <div>
-              <p class="eyebrow">回复处理</p>
-              <h2 id="outcomes-title">回复结果</h2>
-              <p class="panel-note">11月27日 00:00–16:20 · 共 43 条回复记录</p>
+            <h2 id="hourly-title">今日分时入站</h2>
+            <span class="period-chip">08–16h · 47 条</span>
+          </div>
+          <figure class="chart-figure">
+            <svg class="chart-svg" viewBox="0 0 280 148" role="img" aria-label="今日08时至16时每小时入站条数：08时2条，09时5条，10时8条，11时7条，12时3条，13时4条，14时7条，15时6条，16时5条">
+              <line class="svg-grid" x1="22" y1="20" x2="272" y2="20" />
+              <line class="svg-grid" x1="22" y1="70" x2="272" y2="70" />
+              <line class="svg-axis" x1="22" y1="120" x2="272" y2="120" />
+
+              <text class="svg-label" x="17" y="23" text-anchor="end">10</text>
+              <text class="svg-label" x="17" y="73" text-anchor="end">5</text>
+              <text class="svg-label" x="17" y="123" text-anchor="end">0</text>
+
+              <rect class="svg-bar--solid" x="30" y="100" width="16" height="20" rx="1.5" opacity="0.55" />
+              <rect class="svg-bar--solid" x="57" y="70" width="16" height="50" rx="1.5" opacity="0.72" />
+              <rect class="svg-bar--peak" x="85" y="40" width="16" height="80" rx="1.5" />
+              <rect class="svg-bar--solid" x="112" y="50" width="16" height="70" rx="1.5" opacity="0.88" />
+              <rect class="svg-bar--solid" x="140" y="90" width="16" height="30" rx="1.5" opacity="0.58" />
+              <rect class="svg-bar--solid" x="167" y="80" width="16" height="40" rx="1.5" opacity="0.65" />
+              <rect class="svg-bar--solid" x="195" y="50" width="16" height="70" rx="1.5" opacity="0.88" />
+              <rect class="svg-bar--solid" x="222" y="60" width="16" height="60" rx="1.5" opacity="0.8" />
+              <rect class="svg-bar--solid" x="250" y="70" width="16" height="50" rx="1.5" opacity="0.72" />
+
+              <text class="svg-val" x="38" y="95" text-anchor="middle">2</text>
+              <text class="svg-val" x="65" y="65" text-anchor="middle">5</text>
+              <text class="svg-val svg-val--peak" x="93" y="34" text-anchor="middle">8</text>
+              <text class="svg-val" x="120" y="45" text-anchor="middle">7</text>
+              <text class="svg-val" x="148" y="85" text-anchor="middle">3</text>
+              <text class="svg-val" x="175" y="75" text-anchor="middle">4</text>
+              <text class="svg-val" x="203" y="45" text-anchor="middle">7</text>
+              <text class="svg-val" x="230" y="55" text-anchor="middle">6</text>
+              <text class="svg-val" x="258" y="65" text-anchor="middle">5</text>
+
+              <text class="svg-label" x="38" y="136" text-anchor="middle">08</text>
+              <text class="svg-label" x="65" y="136" text-anchor="middle">09</text>
+              <text class="svg-label" x="93" y="136" text-anchor="middle">10</text>
+              <text class="svg-label" x="120" y="136" text-anchor="middle">11</text>
+              <text class="svg-label" x="148" y="136" text-anchor="middle">12</text>
+              <text class="svg-label" x="175" y="136" text-anchor="middle">13</text>
+              <text class="svg-label" x="203" y="136" text-anchor="middle">14</text>
+              <text class="svg-label" x="230" y="136" text-anchor="middle">15</text>
+              <text class="svg-label" x="258" y="136" text-anchor="middle">16</text>
+            </svg>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="swatch c-ink"></span>高峰 10:00 (8)</span>
+              <span class="legend-item"><span class="swatch c-green"></span>午后次峰 14:00 (7)</span>
             </div>
-          </div>
-          <div class="table-wrap">
-            <table class="data-table outcome-table">
-              <caption class="sr-only">11月27日 00:00至16:20的43条回复记录结果</caption>
-              <thead>
-                <tr>
-                  <th scope="col">结果</th>
-                  <th scope="col" class="number-cell">记录数</th>
-                  <th scope="col" class="number-cell">占 43 条</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <th scope="row"><span class="badge good">实际发送</span><span class="row-note">微信接口已受理，不代表已读</span></th>
-                  <td class="number-cell">34 条</td>
-                  <td class="number-cell">79.1%</td>
-                </tr>
-                <tr>
-                  <th scope="row"><span class="badge muted">影子模式</span><span class="row-note">仅记录，未调用发送接口</span></th>
-                  <td class="number-cell">7 条</td>
-                  <td class="number-cell">16.3%</td>
-                </tr>
-                <tr>
-                  <th scope="row"><span class="badge urgent">发送失败</span><span class="row-note">接口返回错误或传输失败</span></th>
-                  <td class="number-cell">2 条</td>
-                  <td class="number-cell">4.7%</td>
-                </tr>
-              </tbody>
-              <tfoot>
-                <tr>
-                  <th scope="row">合计</th>
-                  <td class="number-cell">43 条</td>
-                  <td class="number-cell">100%</td>
-                </tr>
-              </tfoot>
-            </table>
-          </div>
-          <p class="panel-footnote">占比按一位小数四舍五入。接口受理不代表读者已读；影子模式只记记录，不调用发送接口。</p>
+          </figure>
         </section>
 
-
-        <section class="panel panel--categories" aria-labelledby="categories-title">
+        <section class="panel panel--span-3" aria-labelledby="outcomes-title">
           <div class="panel-head">
-            <div>
-              <p class="eyebrow">Filter 分流</p>
-              <h2 id="categories-title">入站消息分类</h2>
-              <p class="panel-note">近 7 日 · 共 316 条 · 按 Filter 记录</p>
-            </div>
+            <h2 id="outcomes-title">今日回复结果</h2>
+            <span class="period-chip">43 条</span>
           </div>
-          <ol class="category-list" aria-label="近七日 Filter 分类消息数，占316条入站消息">
-            <li>
-              <div class="category-line"><span>question · 问答</span><span class="category-count">220 <span>条 · 69.6%</span></span></div>
+          <div class="donut-layout donut-layout--stack">
+            <svg class="donut-svg" viewBox="0 0 116 116" role="img" aria-label="今日43条回复结果：实际发送34条占79.1%，影子模式7条占16.3%，发送失败2条占4.7%">
+              <circle class="donut-track" cx="58" cy="58" r="42" stroke-width="13" />
+              <g transform="rotate(-90 58 58)">
+                <circle cx="58" cy="58" r="42" fill="none" stroke="var(--green)" stroke-width="13" stroke-dasharray="206.7 263.89" stroke-dashoffset="0" />
+                <circle cx="58" cy="58" r="42" fill="none" stroke="var(--ochre)" stroke-width="13" stroke-dasharray="41.0 263.89" stroke-dashoffset="-208.66" />
+                <circle cx="58" cy="58" r="42" fill="none" stroke="var(--rust)" stroke-width="13" stroke-dasharray="10.3 263.89" stroke-dashoffset="-251.62" />
+              </g>
+              <text class="donut-center-num" x="58" y="57">43</text>
+              <text class="donut-center-sub" x="58" y="71">今日回复</text>
+            </svg>
+            <ul class="donut-legend">
+              <li><span class="swatch c-green"></span><span class="donut-name">实际发送</span><span class="donut-val">34</span><span class="donut-pct">79.1%</span></li>
+              <li><span class="swatch c-ochre"></span><span class="donut-name">影子模式</span><span class="donut-val">7</span><span class="donut-pct">16.3%</span></li>
+              <li><span class="swatch c-rust"></span><span class="donut-name">发送失败</span><span class="donut-val">2</span><span class="donut-pct">4.7%</span></li>
+            </ul>
+          </div>
+          <p class="panel-footnote">已受理≠已读 · 影子模式仅记录未发信</p>
+        </section>
+
+        <!-- Row 2: Filter categories (4) + Routing breakdown (4) + Queue & Exceptions (4) -->
+        <section class="panel panel--span-4" aria-labelledby="categories-title">
+          <div class="panel-head">
+            <h2 id="categories-title">Filter 分类分布</h2>
+            <span class="period-chip">7 日 · 316 条</span>
+          </div>
+          <div class="stack-bar" aria-hidden="true">
+            <span class="c-green" style="--w: 69.6%"></span>
+            <span class="c-teal" style="--w: 12%"></span>
+            <span class="c-slate" style="--w: 9.8%"></span>
+            <span class="c-muted" style="--w: 7.6%"></span>
+            <span class="c-rust" style="--w: 1%"></span>
+          </div>
+          <ol class="hbar-list" aria-label="近7日Filter分类：问答220条，反馈38条，无效31条，不支持24条，紧急3条">
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-green"></span>问答</span>
               <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 69.6%"></span></span>
+              <span class="hbar-val">220<span>69.6%</span></span>
             </li>
-            <li>
-              <div class="category-line"><span>feedback · 意见反馈</span><span class="category-count">38 <span>条 · 12.0%</span></span></div>
-              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 12%"></span></span>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-teal"></span>意见反馈</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-teal" style="--bar-size: 12%"></span></span>
+              <span class="hbar-val">38<span>12.0%</span></span>
             </li>
-            <li>
-              <div class="category-line"><span>emergency · 紧急情况</span><span class="category-count">3 <span>条 · 0.9%</span></span></div>
-              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 0.9%"></span></span>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-slate"></span>无效输入</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-slate" style="--bar-size: 9.8%"></span></span>
+              <span class="hbar-val">31<span>9.8%</span></span>
             </li>
-            <li>
-              <div class="category-line"><span>invalid · 无效输入</span><span class="category-count">31 <span>条 · 9.8%</span></span></div>
-              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 9.8%"></span></span>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-muted"></span>不支持</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-muted" style="--bar-size: 7.6%"></span></span>
+              <span class="hbar-val">24<span>7.6%</span></span>
             </li>
-            <li>
-              <div class="category-line"><span>unsupported · 不支持的内容</span><span class="category-count">24 <span>条 · 7.6%</span></span></div>
-              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 7.6%"></span></span>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-rust"></span>紧急情况</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-rust" style="--bar-size: 2%"></span></span>
+              <span class="hbar-val">3<span>0.9%</span></span>
             </li>
           </ol>
-          <p class="panel-footnote">占比以 316 条入站消息为分母；灰度入组不在本示例统计中。</p>
+          <p class="panel-footnote">不含灰度口令入组</p>
         </section>
 
-        <section class="panel panel--operations" aria-labelledby="operations-title">
+        <section class="panel panel--span-4" aria-labelledby="routing-title">
           <div class="panel-head">
-            <div>
-              <p class="eyebrow">运营关注</p>
-              <h2 id="operations-title">问答批次与馆员待办</h2>
-              <p class="panel-note">11月27日 16:20 快照 · 未结问答批次共 21 个</p>
+            <h2 id="routing-title">问答分流路径</h2>
+            <span class="badge good">自动 91.8%</span>
+          </div>
+          <div class="stack-bar" aria-hidden="true">
+            <span class="c-teal" style="--w: 41.4%"></span>
+            <span class="c-green" style="--w: 38.2%"></span>
+            <span class="c-ochre" style="--w: 12.3%"></span>
+            <span class="c-rust" style="--w: 8.2%"></span>
+          </div>
+          <ol class="hbar-list" aria-label="近7日220条问答分流：Tier 2检索91条，Tier 1预设84条，澄清后答复27条，转馆员待办18条">
+            <li class="hbar-row hbar-row--wide-label">
+              <span class="hbar-label"><span class="swatch c-teal"></span>Tier 2 检索</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-teal" style="--bar-size: 41.4%"></span></span>
+              <span class="hbar-val">91<span>41.4%</span></span>
+            </li>
+            <li class="hbar-row hbar-row--wide-label">
+              <span class="hbar-label"><span class="swatch c-green"></span>Tier 1 预设</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 38.2%"></span></span>
+              <span class="hbar-val">84<span>38.2%</span></span>
+            </li>
+            <li class="hbar-row hbar-row--wide-label">
+              <span class="hbar-label"><span class="swatch c-ochre"></span>单次澄清</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-ochre" style="--bar-size: 12.3%"></span></span>
+              <span class="hbar-val">27<span>12.3%</span></span>
+            </li>
+            <li class="hbar-row hbar-row--wide-label">
+              <span class="hbar-label"><span class="swatch c-rust"></span>馆员兜底</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-rust" style="--bar-size: 8.2%"></span></span>
+              <span class="hbar-val">18<span>8.2%</span></span>
+            </li>
+          </ol>
+          <p class="panel-footnote">分母为近 7 日 220 条 question</p>
+        </section>
+
+        <section class="panel panel--span-4" aria-labelledby="operations-title">
+          <div class="panel-head">
+            <h2 id="operations-title">队列与异常</h2>
+            <span class="period-chip">16:20 快照</span>
+          </div>
+
+          <div class="mini-section">
+            <div class="mini-head">
+              <span>未结问答批次</span>
+              <span>共 21 批</span>
             </div>
-            <span class="badge muted">未结馆员待办 6 个</span>
+            <div class="stack-bar" aria-hidden="true">
+              <span class="c-teal" style="--w: 57.1%"></span>
+              <span class="c-green" style="--w: 28.6%"></span>
+              <span class="c-ochre" style="--w: 14.3%"></span>
+            </div>
+            <div class="inline-kv">
+              <span>待处理<strong>12</strong></span>
+              <span>处理中<strong>6</strong></span>
+              <span>已排队<strong>3</strong></span>
+            </div>
           </div>
-          <div class="triage-block">
-            <h3 class="subsection-title">问答批次状态</h3>
-            <dl class="triage-breakdown">
-              <div><dt>open · 待处理</dt><dd>12 <span>批</span></dd></div>
-              <div><dt>processing · 处理中</dt><dd>6 <span>批</span></dd></div>
-              <div><dt>queued · 已排队</dt><dd>3 <span>批</span></dd></div>
-            </dl>
-            <p class="panel-footnote">6 个未结普通待办（staff_cases · case_kind=staff_todo · status=open）；另有 1 个未结紧急事件（case_kind=emergency · status=open）。</p>
+
+          <div class="mini-section">
+            <div class="mini-head">
+              <span>未结馆员待办</span>
+              <span>共 7 项</span>
+            </div>
+            <div class="stack-bar" aria-hidden="true">
+              <span class="c-rust" style="--w: 14.3%"></span>
+              <span class="c-ink" style="--w: 85.7%"></span>
+            </div>
+            <div class="inline-kv">
+              <span>普通待办<strong>6</strong></span>
+              <span>紧急事件<strong class="urgent-num">1</strong></span>
+            </div>
           </div>
-          <div class="exceptions-block">
-            <h3 class="subsection-title">最近发送失败与馆员兜底 <span>截至 16:20</span></h3>
-            <ol class="exception-list">
-              <li class="exception-item">
-                <div class="exception-heading">
-                  <time datetime="2026-11-27T16:04">11月27日 16:04</time>
-                  <span class="badge urgent">发送失败</span>
-                </div>
-                <p class="exception-title">微信客服接口请求未成功</p>
-                <p class="exception-context">outbound_replies · status=failed · 1 条记录</p>
+
+          <div class="mini-section">
+            <div class="mini-head">
+              <span>最近异常</span>
+              <span>2 条</span>
+            </div>
+            <ol class="alert-list">
+              <li class="alert-row">
+                <time datetime="2026-11-27T16:04">16:04</time>
+                <span class="badge urgent">发信失败</span>
+                <span class="alert-text">微信客服接口请求失败</span>
               </li>
-              <li class="exception-item">
-                <div class="exception-heading">
-                  <time datetime="2026-11-27T15:46">11月27日 15:46</time>
-                  <span class="badge muted">馆员兜底</span>
-                </div>
-                <p class="exception-title">决策路由选择馆员处理</p>
-                <p class="exception-context">triage_runs · stage_path=decision_staff · 1 条记录</p>
+              <li class="alert-row">
+                <time datetime="2026-11-27T15:46">15:46</time>
+                <span class="badge muted">馆员兜底</span>
+                <span class="alert-text">决策路由转人工处理</span>
               </li>
             </ol>
           </div>
@@ -235,7 +379,7 @@
 
     <footer class="footer">
       <span>图书馆智能客服 · 管理员演示</span>
-      <span>所有数字均为合成示例，不关联真实读者、消息或运行记录。</span>
+      <span>合成示例数据，不关联真实读者或运行记录</span>
     </footer>
   </div>
 </body>

@@ -3,47 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
-  <title>图书馆智能客服 | 普通馆员</title>
+  <meta name="theme-color" content="#f3f1e9">
+  <title>待办咨询｜图书馆智能客服</title>
   <link rel="stylesheet" href="dashboard.css">
-  <style>
-    .metric-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .metric-value { white-space: nowrap; }
-    @media (max-width: 560px) {
-      .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .metric:nth-child(3) { grid-column: 1 / -1; }
-    }
-    .urgent-record { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; align-items: start; }
-    .urgent-record h2 { margin: 0; }
-    .urgent-record p { max-width: 58ch; }
-    .urgent-mark { color: #9a432d; font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .case-list { list-style: none; margin: 0; padding: 0; }
-    .case-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .75rem 1rem; padding: .9rem 0; border-top: 1px solid rgba(35, 57, 43, .14); }
-    .case-row:first-child { border-top: 0; }
-    .case-main { min-width: 0; }
-    .case-main h3 { margin: 0; font-size: 1rem; }
-    .case-meta { display: flex; flex-wrap: wrap; gap: .25rem .8rem; margin: .3rem 0 0; color: #58685b; font-size: .9rem; }
-    .case-state { align-self: start; white-space: nowrap; }
-    details { grid-column: 1 / -1; }
-    summary { width: fit-content; min-height: 40px; display: list-item; cursor: pointer; color: #315b3c; }
-    summary:focus-visible { outline: 2px solid #315b3c; outline-offset: 3px; }
-    .thread { margin: .15rem 0 .2rem; padding: .65rem .8rem; background: #f1f2e9; line-height: 1.75; }
-    .thread p { margin: 0; }
-    .thread p + p { margin-top: .45rem; }
-    .closed-summary { display: flex; flex-wrap: wrap; gap: .55rem 1.4rem; align-items: baseline; }
-    .closed-summary strong { font-size: 1.25rem; font-variant-numeric: tabular-nums; }
-    .priority-panel { grid-column: 1 / -1; }
-    .queue-panel { grid-column: span 8; }
-    .closed-panel { grid-column: span 4; }
-    @media (max-width: 800px) {
-      .priority-panel, .queue-panel, .closed-panel { grid-column: 1; }
-    }
-    @media (max-width: 560px) {
-      .urgent-record { grid-template-columns: 1fr; }
-      .urgent-mark { grid-row: 1; }
-      .case-row { gap: .55rem; }
-    }
-  </style>
 </head>
 <body>
   <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -51,7 +13,7 @@
     <header class="masthead">
       <a class="brand" href="index.html" aria-label="图书馆智能客服首页">
         <span class="brand-mark" aria-hidden="true">馆</span>
-        <span>图书馆智能客服</span>
+        <span class="brand-name">图书馆智能客服</span>
       </a>
       <nav class="role-switch" aria-label="工作视图">
         <a href="index.html">管理员</a>
@@ -60,77 +22,341 @@
     </header>
 
     <main id="main-content">
-      <section class="page-head" aria-labelledby="page-title">
-        <div>
+      <section class="page-head page-head--compact" aria-labelledby="page-title">
+        <div class="page-title-group">
           <h1 id="page-title">待办咨询</h1>
-          <p class="lede">先看紧急事项，再浏览值班队列中的普通未结案咨询。</p>
+          <span class="updated-at">值班队列</span>
         </div>
-        <span class="demo-tag">示例数据 · 全部虚构</span>
+        <div class="page-meta">
+          <span class="demo-tag">示例数据</span>
+          <span class="updated-at">快照 2026-11-27 16:20</span>
+        </div>
       </section>
 
       <section class="metric-strip" aria-label="当前队列概览">
-        <article class="metric"><h2 class="metric-label">待跟进</h2><p class="metric-value">7</p><p class="metric-note">1 条紧急事项 + 6 条普通事项</p></article>
-        <article class="metric"><h2 class="metric-label">最早待办</h2><p class="metric-value">2 小时</p><p class="metric-note">普通咨询队列</p></article>
-        <article class="metric"><h2 class="metric-label">今日已结</h2><p class="metric-value">12</p><p class="metric-note">截至 16:20</p></article>
+        <article class="metric">
+          <div class="metric-top">
+            <h2 class="metric-label">待跟进</h2>
+            <span class="metric-delta metric-delta--warn">1 紧急</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">7<span class="metric-unit">项</span></p>
+          </div>
+          <div class="micro-bar" aria-hidden="true">
+            <span class="c-rust" style="--w: 14.3%"></span>
+            <span class="c-ink" style="--w: 85.7%"></span>
+          </div>
+          <p class="metric-note">紧急 1 · 普通 6</p>
+        </article>
+
+        <article class="metric">
+          <div class="metric-top">
+            <h2 class="metric-label">最长等待</h2>
+            <span class="metric-delta metric-delta--warn">超 2h</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">121<span class="metric-unit">分</span></p>
+          </div>
+          <div class="micro-bar" aria-hidden="true">
+            <span class="c-rust" style="--w: 100%"></span>
+          </div>
+          <p class="metric-note">14:19 · 图书预约</p>
+        </article>
+
+        <article class="metric">
+          <div class="metric-top">
+            <h2 class="metric-label">今日已结</h2>
+            <span class="metric-delta">63.2%</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">12<span class="metric-unit">项</span></p>
+          </div>
+          <div class="micro-bar" aria-hidden="true">
+            <span class="c-green" style="--w: 63.2%"></span>
+          </div>
+          <p class="metric-note">今日累计入队 19 项</p>
+        </article>
+
+        <article class="metric">
+          <div class="metric-top">
+            <h2 class="metric-label">均响耗时</h2>
+            <span class="metric-delta">达标 ≤30m</span>
+          </div>
+          <div class="metric-mid">
+            <p class="metric-value">24<span class="metric-unit">分</span></p>
+            <svg class="metric-spark" viewBox="0 0 64 24" aria-hidden="true">
+              <polygon class="svg-area" points="2,16 14,13 26,18 38,11 50,9 62,12 62,22 2,22" />
+              <polyline class="svg-line" points="2,16 14,13 26,18 38,11 50,9 62,12" />
+              <circle cx="62" cy="12" r="2.2" fill="var(--ink)" />
+            </svg>
+          </div>
+          <p class="metric-note">近 6 笔已结均值</p>
+        </article>
+      </section>
+
+      <section class="urgent-banner" aria-labelledby="priority-title">
+        <div class="urgent-banner-main">
+          <span class="urgent-dot" aria-hidden="true"></span>
+          <span class="badge urgent">紧急</span>
+          <h2 id="priority-title">电梯内有人受困</h2>
+          <span class="urgent-banner-desc">设施安全 · 16:08 · 乘客已按紧急呼叫</span>
+        </div>
+        <div class="urgent-banner-meta">
+          <span>已发紧急联系方式</span>
+        </div>
       </section>
 
       <div class="dashboard-grid">
-        <section class="panel priority-panel" aria-labelledby="priority-title">
+        <section class="panel panel--span-8 panel--queue-main" aria-labelledby="queue-title">
           <div class="panel-head">
-            <div><p class="eyebrow">紧急事项 · 虚构示例</p><h2 id="priority-title">电梯内有人受困</h2></div>
-            <span class="badge urgent">紧急</span>
+            <h2 id="queue-title">普通未结案队列</h2>
+            <span class="period-chip">按等待时长降序 · 6 条</span>
           </div>
-          <div class="urgent-record">
-            <div>
-              <p>示例状态：电梯故障，乘客已通过紧急呼叫装置求助。</p>
-              <p class="case-meta"><span>设施安全</span><span>今天 16:08 报告</span></p>
-            </div>
-            <span class="urgent-mark">系统已发送紧急联系方式</span>
-          </div>
-        </section>
+          <ol class="queue-list">
+            <li class="queue-row">
+              <div class="queue-title-line">
+                <h3>预约书到馆后如何领取</h3>
+                <span class="badge muted">图书预约</span>
+                <span class="queue-time">14:19</span>
+              </div>
+              <div class="wait-cell">
+                <div class="wait-label wait-label--high"><span>等待</span><strong>121分</strong></div>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-rust" style="--bar-size: 100%"></span></span>
+              </div>
+              <span class="badge urgent queue-action">优先</span>
+              <details class="queue-details">
+                <summary>展开读者留言</summary>
+                <div class="queue-thread"><strong>读者 14:19：</strong>收到到馆通知后，可以请同事代取吗？</div>
+              </details>
+            </li>
 
-        <section class="panel queue-panel" aria-labelledby="queue-title">
-          <div class="panel-head">
-            <div><p class="eyebrow">值班队列</p><h2 id="queue-title">普通未结案咨询</h2></div>
-            <span class="badge muted">6 条</span>
-          </div>
-          <ol class="case-list">
-            <li class="case-row">
-              <div class="case-main"><h3>预约书到馆后如何领取</h3><p class="case-meta"><span>图书预约</span><span>今天 14:19 · 等待 2 小时</span></p></div>
-              <span class="badge muted case-state">待跟进</span>
-              <details><summary>查看读者留言示例</summary><div class="thread"><p><strong>读者 · 14:19：</strong>收到到馆通知后，可以请同事代取吗？</p></div></details>
+            <li class="queue-row">
+              <div class="queue-title-line">
+                <h3>校外访问电子期刊</h3>
+                <span class="badge muted">电子资源</span>
+                <span class="queue-time">14:46</span>
+              </div>
+              <div class="wait-cell">
+                <div class="wait-label wait-label--high"><span>等待</span><strong>94分</strong></div>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-rust" style="--bar-size: 78%"></span></span>
+              </div>
+              <span class="badge ochre queue-action">待跟进</span>
             </li>
-            <li class="case-row">
-              <div class="case-main"><h3>校外访问电子期刊</h3><p class="case-meta"><span>电子资源</span><span>今天 14:46 · 等待 1 小时 34 分</span></p></div>
-              <span class="badge muted case-state">待跟进</span>
+
+            <li class="queue-row">
+              <div class="queue-title-line">
+                <h3>研修间开放时段</h3>
+                <span class="badge muted">空间设施</span>
+                <span class="queue-time">15:02</span>
+              </div>
+              <div class="wait-cell">
+                <div class="wait-label wait-label--mid"><span>等待</span><strong>78分</strong></div>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-ochre" style="--bar-size: 64%"></span></span>
+              </div>
+              <span class="badge ochre queue-action">待跟进</span>
+              <details class="queue-details">
+                <summary>展开读者留言</summary>
+                <div class="queue-thread"><strong>读者 15:02：</strong>周六下午可以预约小组研修间吗？</div>
+              </details>
             </li>
-            <li class="case-row">
-              <div class="case-main"><h3>研修间开放时段</h3><p class="case-meta"><span>空间与设施</span><span>今天 15:02 · 等待 1 小时 18 分</span></p></div>
-              <span class="badge muted case-state">待跟进</span>
-              <details><summary>查看读者留言示例</summary><div class="thread"><p><strong>读者 · 15:02：</strong>周六下午可以预约小组研修间吗？</p></div></details>
+
+            <li class="queue-row">
+              <div class="queue-title-line">
+                <h3>馆际互借的到书通知</h3>
+                <span class="badge muted">馆际互借</span>
+                <span class="queue-time">15:37</span>
+              </div>
+              <div class="wait-cell">
+                <div class="wait-label"><span>等待</span><strong>43分</strong></div>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-teal" style="--bar-size: 36%"></span></span>
+              </div>
+              <span class="badge muted queue-action">待跟进</span>
             </li>
-            <li class="case-row">
-              <div class="case-main"><h3>馆际互借的到书通知</h3><p class="case-meta"><span>馆际互借</span><span>今天 15:37 · 等待 43 分钟</span></p></div>
-              <span class="badge muted case-state">待跟进</span>
+
+            <li class="queue-row">
+              <div class="queue-title-line">
+                <h3>学位论文的校内查阅方式</h3>
+                <span class="badge muted">学术资源</span>
+                <span class="queue-time">16:02</span>
+              </div>
+              <div class="wait-cell">
+                <div class="wait-label"><span>等待</span><strong>18分</strong></div>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 15%"></span></span>
+              </div>
+              <span class="badge muted queue-action">待跟进</span>
             </li>
-            <li class="case-row">
-              <div class="case-main"><h3>学位论文的校内查阅方式</h3><p class="case-meta"><span>学术资源</span><span>今天 16:02 · 等待 18 分钟</span></p></div>
-              <span class="badge muted case-state">待跟进</span>
-            </li>
-            <li class="case-row">
-              <div class="case-main"><h3>借阅证补办需要的材料</h3><p class="case-meta"><span>读者服务</span><span>今天 16:14 · 等待 6 分钟</span></p></div>
-              <span class="badge muted case-state">待跟进</span>
+
+            <li class="queue-row">
+              <div class="queue-title-line">
+                <h3>借阅证补办需要的材料</h3>
+                <span class="badge muted">读者服务</span>
+                <span class="queue-time">16:14</span>
+              </div>
+              <div class="wait-cell">
+                <div class="wait-label"><span>等待</span><strong>6分</strong></div>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 6%"></span></span>
+              </div>
+              <span class="badge muted queue-action">待跟进</span>
             </li>
           </ol>
         </section>
 
-        <section class="panel closed-panel" aria-labelledby="closed-title">
-          <div class="panel-head"><div><p class="eyebrow">刚刚完成</p><h2 id="closed-title">近期结案概览</h2></div><span class="badge good">今日</span></div>
-          <div class="closed-summary"><strong>12 条</strong><span>最近结案主题：馆内阅览座位、数据库校外访问、借阅期限说明</span></div>
+        <div class="right-stack">
+          <section class="panel" aria-labelledby="wait-dist-title">
+            <div class="panel-head">
+              <h2 id="wait-dist-title">待办结构</h2>
+              <span class="period-chip">7 项未结</span>
+            </div>
+            <div class="donut-layout">
+              <svg class="donut-svg donut-svg--sm" viewBox="0 0 100 100" role="img" aria-label="7项待跟进分布：紧急1项，等待60分钟以上3项，30至60分钟1项，30分钟以内2项">
+                <circle class="donut-track" cx="50" cy="50" r="36" stroke-width="11" />
+                <g transform="rotate(-90 50 50)">
+                  <circle cx="50" cy="50" r="36" fill="none" stroke="var(--rust)" stroke-width="11" stroke-dasharray="30.3 226.19" stroke-dashoffset="0" />
+                  <circle cx="50" cy="50" r="36" fill="none" stroke="var(--ochre)" stroke-width="11" stroke-dasharray="94.9 226.19" stroke-dashoffset="-32.31" />
+                  <circle cx="50" cy="50" r="36" fill="none" stroke="var(--teal)" stroke-width="11" stroke-dasharray="30.3 226.19" stroke-dashoffset="-129.25" />
+                  <circle cx="50" cy="50" r="36" fill="none" stroke="var(--green)" stroke-width="11" stroke-dasharray="62.6 226.19" stroke-dashoffset="-161.56" />
+                </g>
+                <text class="donut-center-num" x="50" y="49" font-size="18">7</text>
+                <text class="donut-center-sub" x="50" y="62">待跟进</text>
+              </svg>
+              <ul class="donut-legend">
+                <li><span class="swatch c-rust"></span><span class="donut-name">紧急事项</span><span class="donut-val">1</span><span class="donut-pct">14%</span></li>
+                <li><span class="swatch c-ochre"></span><span class="donut-name">等待 ≥60m</span><span class="donut-val">3</span><span class="donut-pct">43%</span></li>
+                <li><span class="swatch c-teal"></span><span class="donut-name">30–60m</span><span class="donut-val">1</span><span class="donut-pct">14%</span></li>
+                <li><span class="swatch c-green"></span><span class="donut-name">&lt;30m</span><span class="donut-val">2</span><span class="donut-pct">29%</span></li>
+              </ul>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="closed-title">
+            <div class="panel-head">
+              <h2 id="closed-title">今日已结分类</h2>
+              <span class="badge good">12 项</span>
+            </div>
+            <ol class="hbar-list" aria-label="今日12条已结案分类：阅览座位4项，电子资源3项，借阅规则3项，图书预约2项">
+              <li class="hbar-row">
+                <span class="hbar-label"><span class="swatch c-green"></span>阅览座位</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 100%"></span></span>
+                <span class="hbar-val">4<span>33%</span></span>
+              </li>
+              <li class="hbar-row">
+                <span class="hbar-label"><span class="swatch c-teal"></span>电子资源</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-teal" style="--bar-size: 75%"></span></span>
+                <span class="hbar-val">3<span>25%</span></span>
+              </li>
+              <li class="hbar-row">
+                <span class="hbar-label"><span class="swatch c-ink"></span>借阅规则</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-ink" style="--bar-size: 75%"></span></span>
+                <span class="hbar-val">3<span>25%</span></span>
+              </li>
+              <li class="hbar-row">
+                <span class="hbar-label"><span class="swatch c-ochre"></span>图书预约</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill c-ochre" style="--bar-size: 50%"></span></span>
+                <span class="hbar-val">2<span>17%</span></span>
+              </li>
+            </ol>
+          </section>
+        </div>
+
+        <section class="panel panel--span-7" aria-labelledby="pace-title">
+          <div class="panel-head">
+            <h2 id="pace-title">今日入队 vs 已结</h2>
+            <span class="period-chip">09–16h · 19 入 · 12 结</span>
+          </div>
+          <figure class="chart-figure">
+            <svg class="chart-svg" viewBox="0 0 420 104" role="img" aria-label="09时至16时每小时入队与已结数量对比，累计入队19项，已结12项">
+              <line class="svg-grid" x1="24" y1="14" x2="408" y2="14" />
+              <line class="svg-grid" x1="24" y1="47" x2="408" y2="47" />
+              <line class="svg-axis" x1="24" y1="80" x2="408" y2="80" />
+
+              <text class="svg-label" x="18" y="17" text-anchor="end">4</text>
+              <text class="svg-label" x="18" y="50" text-anchor="end">2</text>
+              <text class="svg-label" x="18" y="83" text-anchor="end">0</text>
+
+              <!-- 09: 1 / 1 -->
+              <rect class="svg-bar--secondary" x="38" y="63.5" width="13" height="16.5" rx="1.5" />
+              <rect class="svg-bar--solid" x="53" y="63.5" width="13" height="16.5" rx="1.5" />
+              <!-- 10: 2 / 2 -->
+              <rect class="svg-bar--secondary" x="85" y="47" width="13" height="33" rx="1.5" />
+              <rect class="svg-bar--solid" x="100" y="47" width="13" height="33" rx="1.5" />
+              <!-- 11: 2 / 2 -->
+              <rect class="svg-bar--secondary" x="132" y="47" width="13" height="33" rx="1.5" />
+              <rect class="svg-bar--solid" x="147" y="47" width="13" height="33" rx="1.5" />
+              <!-- 12: 1 / 1 -->
+              <rect class="svg-bar--secondary" x="179" y="63.5" width="13" height="16.5" rx="1.5" />
+              <rect class="svg-bar--solid" x="194" y="63.5" width="13" height="16.5" rx="1.5" />
+              <!-- 13: 2 / 1 -->
+              <rect class="svg-bar--secondary" x="226" y="47" width="13" height="33" rx="1.5" />
+              <rect class="svg-bar--solid" x="241" y="63.5" width="13" height="16.5" rx="1.5" />
+              <!-- 14: 4 / 2 -->
+              <rect class="svg-bar--secondary" x="273" y="14" width="13" height="66" rx="1.5" />
+              <rect class="svg-bar--solid" x="288" y="47" width="13" height="33" rx="1.5" />
+              <!-- 15: 4 / 2 -->
+              <rect class="svg-bar--secondary" x="320" y="14" width="13" height="66" rx="1.5" />
+              <rect class="svg-bar--solid" x="335" y="47" width="13" height="33" rx="1.5" />
+              <!-- 16: 3 / 1 -->
+              <rect class="svg-bar--secondary" x="367" y="30.5" width="13" height="49.5" rx="1.5" />
+              <rect class="svg-bar--solid" x="382" y="63.5" width="13" height="16.5" rx="1.5" />
+
+              <text class="svg-label" x="52" y="96" text-anchor="middle">09:00</text>
+              <text class="svg-label" x="99" y="96" text-anchor="middle">10:00</text>
+              <text class="svg-label" x="146" y="96" text-anchor="middle">11:00</text>
+              <text class="svg-label" x="193" y="96" text-anchor="middle">12:00</text>
+              <text class="svg-label" x="240" y="96" text-anchor="middle">13:00</text>
+              <text class="svg-label" x="287" y="96" text-anchor="middle">14:00</text>
+              <text class="svg-label" x="334" y="96" text-anchor="middle">15:00</text>
+              <text class="svg-label" x="381" y="96" text-anchor="middle">16:00</text>
+            </svg>
+            <div class="chart-legend">
+              <span class="legend-item"><span class="swatch c-muted"></span>入队 19</span>
+              <span class="legend-item"><span class="swatch c-green"></span>已结 12</span>
+              <span class="legend-item"><span class="swatch c-ochre"></span>14–15h 为入队高峰</span>
+            </div>
+          </figure>
+        </section>
+
+        <section class="panel panel--span-5" aria-labelledby="latency-title">
+          <div class="panel-head">
+            <h2 id="latency-title">已结响应耗时分布</h2>
+            <span class="badge good">均 24m</span>
+          </div>
+          <div class="stack-bar" aria-hidden="true">
+            <span class="c-green" style="--w: 25%"></span>
+            <span class="c-teal" style="--w: 33.3%"></span>
+            <span class="c-ochre" style="--w: 25%"></span>
+            <span class="c-rust" style="--w: 16.7%"></span>
+          </div>
+          <ol class="hbar-list" aria-label="今日12条已结案响应耗时：10分钟内3项，10至20分钟4项，20至30分钟3项，30分钟以上2项">
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-green"></span>≤10 分钟</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 75%"></span></span>
+              <span class="hbar-val">3<span>25%</span></span>
+            </li>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-teal"></span>10–20 分</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-teal" style="--bar-size: 100%"></span></span>
+              <span class="hbar-val">4<span>33%</span></span>
+            </li>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-ochre"></span>20–30 分</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-ochre" style="--bar-size: 75%"></span></span>
+              <span class="hbar-val">3<span>25%</span></span>
+            </li>
+            <li class="hbar-row">
+              <span class="hbar-label"><span class="swatch c-rust"></span>&gt;30 分钟</span>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill c-rust" style="--bar-size: 50%"></span></span>
+              <span class="hbar-val">2<span>17%</span></span>
+            </li>
+          </ol>
+          <p class="panel-footnote">83% 在 30 分钟目标内结案</p>
         </section>
       </div>
     </main>
-    <footer class="footer"><span>馆员工作视图</span><span>仅供界面演示 · 示例数据不对应真实读者或咨询</span></footer>
+
+    <footer class="footer">
+      <span>图书馆智能客服 · 馆员演示</span>
+      <span>合成示例数据，不关联真实读者或咨询</span>
+    </footer>
   </div>
 </body>
 </html>
