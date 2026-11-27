@@ -1281,6 +1281,35 @@ class SupportStore:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_librarian_inbox(self, *, before: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        """Return retained reader messages for display-only librarian inbox pages."""
+        bounded = max(1, min(limit, 200))
+        with self._lock:
+            now = float(self._clock())
+            clauses = [
+                "reader_id <> ''",
+                "msg_type <> 'event'",
+                "event = ''",
+                "received_at_epoch >= ?",
+                "(expires_at_epoch IS NULL OR expires_at_epoch > ?)",
+            ]
+            params: list[Any] = [now - DEFAULT_RETENTION_SECONDS, now]
+            if before is not None:
+                clauses.append("seq < ?")
+                params.append(int(before))
+            params.append(bounded)
+            rows = self._conn.execute(
+                f"""
+                SELECT seq, received_at_utc, reader_id, msg_type, content, filter_category
+                FROM inbound_events
+                WHERE {' AND '.join(clauses)}
+                ORDER BY seq DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def list_batches(self, *, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 200))
         where_sql = "WHERE status = ?" if status else ""
