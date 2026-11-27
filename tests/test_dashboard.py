@@ -246,6 +246,117 @@ class DashboardRouteTests(unittest.TestCase):
         response = client.request("GET", "/dashboard/admin")
         self.assertEqual(response.status_code, 404)
 
+    def test_live_charts_inline_css_and_librarian_case_closure_flow(self):
+        case = self.store.create_staff_case(
+            account_id="official-account",
+            reader_id="openid-secret-case",
+            summary="借阅证遗失补办",
+            latest_message="请问借阅证丢了怎么挂失？",
+            case_kind="staff_todo",
+        )
+        self.store.ingest_event(
+            {
+                "to_user": "official-account",
+                "from_user": "openid-secret-fb",
+                "msg_type": "text",
+                "msg_id": "fb-msg-1",
+                "content": "建议三楼增加电源插座",
+            },
+            FilterDecision(category="feedback", reason="suggestion", normalized_text="建议三楼增加电源插座"),
+        )
+        self.store.record_triage_run(
+            batch_id=1,
+            account_id="official-account",
+            reader_id="reader-0",
+            generation=1,
+            clarified_already=False,
+            stage_path="tier2_short",
+            reply_preview="短答",
+        )
+
+        admin = self.client.request(
+            "GET",
+            "/dashboard/admin",
+            headers=self._request_headers("admin", "admin-test-password"),
+        )
+        self.assertEqual(admin.status_code, 200)
+        self.assertIn("<style>", admin.text)
+        self.assertIn("近 7 日入站趋势", admin.text)
+        self.assertIn("问答分流路径", admin.text)
+        self.assertIn("<svg", admin.text)
+        self.assertIn("script-src 'none'", admin.headers["content-security-policy"])
+
+        css = self.client.request("GET", "/dashboard/static/dashboard.css")
+        self.assertEqual(css.status_code, 200)
+        self.assertIn(".view-tabs", css.text)
+
+        lib_cases = self.client.request(
+            "GET",
+            "/dashboard/librarian?view=cases",
+            headers=self._request_headers("librarian", "librarian-test-password"),
+        )
+        self.assertEqual(lib_cases.status_code, 200)
+        self.assertIn("借阅证遗失补办", lib_cases.text)
+        self.assertIn(f"/dashboard/librarian/cases/{case.case_id}/close", lib_cases.text)
+        self.assertNotIn("openid-secret-case", lib_cases.text)
+        self.assertNotIn("Reader 50", lib_cases.text)
+
+        lib_fb = self.client.request(
+            "GET",
+            "/dashboard/librarian?view=feedback",
+            headers=self._request_headers("librarian", "librarian-test-password"),
+        )
+        self.assertEqual(lib_fb.status_code, 200)
+        self.assertIn("建议三楼增加电源插座", lib_fb.text)
+        self.assertNotIn("openid-secret-fb", lib_fb.text)
+
+        base_headers = {
+            "content-type": "application/x-www-form-urlencoded",
+            "origin": "https://dashboard.example",
+            "sec-fetch-site": "same-origin",
+        }
+        cross_origin = self.client.request(
+            "POST",
+            f"/dashboard/librarian/cases/{case.case_id}/close",
+            body=urlencode({"confirm": "yes", "resolution_note": "已回复"}).encode(),
+            headers={
+                **base_headers,
+                "origin": "https://evil.example",
+                **self._request_headers("librarian", "librarian-test-password"),
+            },
+        )
+        self.assertEqual(cross_origin.status_code, 403)
+
+        missing_confirm = self.client.request(
+            "POST",
+            f"/dashboard/librarian/cases/{case.case_id}/close",
+            body=urlencode({"resolution_note": "未勾选确认", "view": "cases"}).encode(),
+            headers={**base_headers, **self._request_headers("librarian", "librarian-test-password")},
+        )
+        self.assertEqual(missing_confirm.status_code, 303)
+        self.assertIn("result=invalid", missing_confirm.headers["location"])
+        self.assertEqual(len(self.store.list_staff_cases(status="open")), 1)
+
+        closed = self.client.request(
+            "POST",
+            f"/dashboard/librarian/cases/{case.case_id}/close",
+            body=urlencode({"confirm": "yes", "resolution_note": "已在后台指引 <挂失>", "view": "cases"}).encode(),
+            headers={**base_headers, **self._request_headers("librarian", "librarian-test-password")},
+        )
+        self.assertEqual(closed.status_code, 303)
+        self.assertEqual(closed.headers["location"], "/dashboard/librarian?view=cases&result=closed")
+        self.assertEqual(len(self.store.list_staff_cases(status="open")), 0)
+
+        after = self.client.request(
+            "GET",
+            "/dashboard/librarian?view=cases&result=closed",
+            headers=self._request_headers("librarian", "librarian-test-password"),
+        )
+        self.assertEqual(after.status_code, 200)
+        self.assertIn("工单已标记结案", after.text)
+        self.assertIn("已在后台指引 &lt;挂失&gt;", after.text)
+        self.assertNotIn("<挂失>", after.text)
+
 
 if __name__ == "__main__":
     unittest.main()
