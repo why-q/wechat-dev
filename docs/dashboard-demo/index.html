@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f6f0">
+  <title>服务总览｜图书馆智能客服</title>
+  <link rel="stylesheet" href="dashboard.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">跳到主要内容</a>
+  <div class="shell">
+    <header class="masthead">
+      <a class="brand" href="index.html" aria-label="图书馆智能客服，管理员总览">
+        <span class="brand-mark" aria-hidden="true">馆</span>
+        <span class="brand-name">图书馆智能客服</span>
+      </a>
+      <nav class="role-switch" aria-label="切换角色">
+        <a href="index.html" aria-current="page">管理员</a>
+        <a href="librarian.html">普通馆员</a>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="page-head" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">运营台 <span aria-hidden="true">/</span> 管理员</p>
+          <h1 id="page-title">服务总览</h1>
+          <p class="lede">查看入站消息、Filter 分类、问答队列与回复状态。</p>
+        </div>
+        <div class="page-meta">
+          <span class="demo-tag">示例数据</span>
+          <span class="updated-at">数据快照 2026年11月27日 16:20</span>
+        </div>
+      </section>
+
+      <section class="metric-strip" aria-label="关键指标">
+        <article class="metric">
+          <h2 class="metric-label">近 7 日收到消息</h2>
+          <p class="metric-value">316</p>
+          <p class="metric-note">条 · 11月21日至27日 · 按 Filter 分类</p>
+        </article>
+        <article class="metric">
+          <h2 class="metric-label">未结问答批次</h2>
+          <p class="metric-value">21</p>
+          <p class="metric-note">批 · 待处理 12 · 处理中 6 · 已排队 3</p>
+        </article>
+        <article class="metric">
+          <h2 class="metric-label">未结馆员待办</h2>
+          <p class="metric-value">6</p>
+          <p class="metric-note">个普通待办 · 截至 2026年11月27日 16:20</p>
+        </article>
+        <article class="metric">
+          <h2 class="metric-label">当日回复记录</h2>
+          <p class="metric-value">43</p>
+          <p class="metric-note">条 · 11月27日 00:00–16:20</p>
+        </article>
+      </section>
+
+      <div class="dashboard-grid" aria-label="服务运营详情">
+        <section class="panel panel--traffic" aria-labelledby="traffic-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">入站趋势</p>
+              <h2 id="traffic-title">每日收到消息</h2>
+              <p class="panel-note">入站消息条数 · 近 7 日（11月21日至27日）</p>
+            </div>
+            <span class="period-chip">合计 316 条</span>
+          </div>
+          <figure class="chart-figure">
+            <ol class="traffic-chart" aria-label="近七日每日收到的入站消息数，共316条">
+              <li class="chart-row">
+                <span class="chart-day">周六 21日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 56.7%"></span></span>
+                <span class="chart-count">34 <span>条</span></span>
+              </li>
+              <li class="chart-row">
+                <span class="chart-day">周日 22日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 71.7%"></span></span>
+                <span class="chart-count">43 <span>条</span></span>
+              </li>
+              <li class="chart-row">
+                <span class="chart-day">周一 23日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 76.7%"></span></span>
+                <span class="chart-count">46 <span>条</span></span>
+              </li>
+              <li class="chart-row">
+                <span class="chart-day">周二 24日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 65%"></span></span>
+                <span class="chart-count">39 <span>条</span></span>
+              </li>
+              <li class="chart-row">
+                <span class="chart-day">周三 25日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 86.7%"></span></span>
+                <span class="chart-count">52 <span>条</span></span>
+              </li>
+              <li class="chart-row">
+                <span class="chart-day">周四 26日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 91.7%"></span></span>
+                <span class="chart-count">55 <span>条</span></span>
+              </li>
+              <li class="chart-row">
+                <span class="chart-day">周五 27日</span>
+                <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 78.3%"></span></span>
+                <span class="chart-count">47 <span>条</span></span>
+              </li>
+            </ol>
+            <figcaption class="chart-caption">横条长度按消息条数比例展示，参考上限为 60 条。</figcaption>
+          </figure>
+        </section>
+
+        <section class="panel panel--outcomes" aria-labelledby="outcomes-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">回复处理</p>
+              <h2 id="outcomes-title">回复结果</h2>
+              <p class="panel-note">11月27日 00:00–16:20 · 共 43 条回复记录</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table outcome-table">
+              <caption class="sr-only">11月27日 00:00至16:20的43条回复记录结果</caption>
+              <thead>
+                <tr>
+                  <th scope="col">结果</th>
+                  <th scope="col" class="number-cell">记录数</th>
+                  <th scope="col" class="number-cell">占 43 条</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row"><span class="badge good">实际发送</span><span class="row-note">微信接口已受理，不代表已读</span></th>
+                  <td class="number-cell">34 条</td>
+                  <td class="number-cell">79.1%</td>
+                </tr>
+                <tr>
+                  <th scope="row"><span class="badge muted">影子模式</span><span class="row-note">仅记录，未调用发送接口</span></th>
+                  <td class="number-cell">7 条</td>
+                  <td class="number-cell">16.3%</td>
+                </tr>
+                <tr>
+                  <th scope="row"><span class="badge urgent">发送失败</span><span class="row-note">接口返回错误或传输失败</span></th>
+                  <td class="number-cell">2 条</td>
+                  <td class="number-cell">4.7%</td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <th scope="row">合计</th>
+                  <td class="number-cell">43 条</td>
+                  <td class="number-cell">100%</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <p class="panel-footnote">占比按一位小数四舍五入。接口受理不代表读者已读；影子模式只记记录，不调用发送接口。</p>
+        </section>
+
+
+        <section class="panel panel--categories" aria-labelledby="categories-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Filter 分流</p>
+              <h2 id="categories-title">入站消息分类</h2>
+              <p class="panel-note">近 7 日 · 共 316 条 · 按 Filter 记录</p>
+            </div>
+          </div>
+          <ol class="category-list" aria-label="近七日 Filter 分类消息数，占316条入站消息">
+            <li>
+              <div class="category-line"><span>question · 问答</span><span class="category-count">220 <span>条 · 69.6%</span></span></div>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 69.6%"></span></span>
+            </li>
+            <li>
+              <div class="category-line"><span>feedback · 意见反馈</span><span class="category-count">38 <span>条 · 12.0%</span></span></div>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 12%"></span></span>
+            </li>
+            <li>
+              <div class="category-line"><span>emergency · 紧急情况</span><span class="category-count">3 <span>条 · 0.9%</span></span></div>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 0.9%"></span></span>
+            </li>
+            <li>
+              <div class="category-line"><span>invalid · 无效输入</span><span class="category-count">31 <span>条 · 9.8%</span></span></div>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 9.8%"></span></span>
+            </li>
+            <li>
+              <div class="category-line"><span>unsupported · 不支持的内容</span><span class="category-count">24 <span>条 · 7.6%</span></span></div>
+              <span class="bar-track" aria-hidden="true"><span class="bar-fill" style="--bar-size: 7.6%"></span></span>
+            </li>
+          </ol>
+          <p class="panel-footnote">占比以 316 条入站消息为分母；灰度入组不在本示例统计中。</p>
+        </section>
+
+        <section class="panel panel--operations" aria-labelledby="operations-title">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">运营关注</p>
+              <h2 id="operations-title">问答批次与馆员待办</h2>
+              <p class="panel-note">11月27日 16:20 快照 · 未结问答批次共 21 个</p>
+            </div>
+            <span class="badge muted">未结馆员待办 6 个</span>
+          </div>
+          <div class="triage-block">
+            <h3 class="subsection-title">问答批次状态</h3>
+            <dl class="triage-breakdown">
+              <div><dt>open · 待处理</dt><dd>12 <span>批</span></dd></div>
+              <div><dt>processing · 处理中</dt><dd>6 <span>批</span></dd></div>
+              <div><dt>queued · 已排队</dt><dd>3 <span>批</span></dd></div>
+            </dl>
+            <p class="panel-footnote">6 个未结普通待办（staff_cases · case_kind=staff_todo · status=open）；另有 1 个未结紧急事件（case_kind=emergency · status=open）。</p>
+          </div>
+          <div class="exceptions-block">
+            <h3 class="subsection-title">最近发送失败与馆员兜底 <span>截至 16:20</span></h3>
+            <ol class="exception-list">
+              <li class="exception-item">
+                <div class="exception-heading">
+                  <time datetime="2026-11-27T16:04">11月27日 16:04</time>
+                  <span class="badge urgent">发送失败</span>
+                </div>
+                <p class="exception-title">微信客服接口请求未成功</p>
+                <p class="exception-context">outbound_replies · status=failed · 1 条记录</p>
+              </li>
+              <li class="exception-item">
+                <div class="exception-heading">
+                  <time datetime="2026-11-27T15:46">11月27日 15:46</time>
+                  <span class="badge muted">馆员兜底</span>
+                </div>
+                <p class="exception-title">决策路由选择馆员处理</p>
+                <p class="exception-context">triage_runs · stage_path=decision_staff · 1 条记录</p>
+              </li>
+            </ol>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <footer class="footer">
+      <span>图书馆智能客服 · 管理员演示</span>
+      <span>所有数字均为合成示例，不关联真实读者、消息或运行记录。</span>
+    </footer>
+  </div>
+</body>
+</html>
