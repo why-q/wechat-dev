@@ -7,6 +7,12 @@
   <title>图书馆智能客服 | 普通馆员</title>
   <link rel="stylesheet" href="dashboard.css">
   <style>
+    .metric-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .metric-value { white-space: nowrap; }
+    @media (max-width: 560px) {
+      .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric:nth-child(3) { grid-column: 1 / -1; }
+    }
     .urgent-record { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1rem; align-items: start; }
     .urgent-record h2 { margin: 0; }
     .urgent-record p { max-width: 58ch; }
@@ -63,9 +69,9 @@
       </section>
 
       <section class="metric-strip" aria-label="当前队列概览">
-        <div class="metric"><span class="metric-label">待跟进</span><strong class="metric-value">7</strong><span class="metric-note">1 条紧急事项 + 6 条普通事项</span></div>
-        <div class="metric"><span class="metric-label">最早待办</span><strong class="metric-value">2 小时</strong><span class="metric-note">普通咨询队列</span></div>
-        <div class="metric"><span class="metric-label">今日已结</span><strong class="metric-value">12</strong><span class="metric-note">截至 16:20</span></div>
+        <article class="metric"><h2 class="metric-label">待跟进</h2><p class="metric-value">7</p><p class="metric-note">1 条紧急事项 + 6 条普通事项</p></article>
+        <article class="metric"><h2 class="metric-label">最早待办</h2><p class="metric-value">2 小时</p><p class="metric-note">普通咨询队列</p></article>
+        <article class="metric"><h2 class="metric-label">今日已结</h2><p class="metric-value">12</p><p class="metric-note">截至 16:20</p></article>
       </section>
 
       <div class="dashboard-grid">
