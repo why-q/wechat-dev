@@ -524,6 +524,19 @@ class Tier2KnowledgeResponder:
         self._retriever = index.as_retriever(similarity_top_k=self.top_k)
         self._llm = llm
 
+    def generate_clarify_question(self, question: str, system_prompt: str) -> str:
+        """Ask the configured chat model to phrase one concise clarifying question."""
+        from llama_index.core.base.llms.types import ChatMessage, MessageRole
+
+        with self._lock:
+            resp = self._llm.chat(
+                [
+                    ChatMessage(role=MessageRole.SYSTEM, content=system_prompt),
+                    ChatMessage(role=MessageRole.USER, content=question),
+                ]
+            )
+        return str(getattr(resp.message, "content", None) or resp)
+
     def query(
         self,
         question: str,

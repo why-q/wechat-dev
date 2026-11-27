@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
-import json
 import os
 from pathlib import Path
 import sqlite3
@@ -12,9 +9,22 @@ import threading
 import time
 from typing import Any, Callable
 
-from .filters import FilterDecision, default_same_case_matcher
+from .filters import FilterDecision
+from .schema import (
+    SCHEMA_SQL as _SCHEMA_SQL,
+    SCHEMA_VERSION,
+    BatchSnapshot,
+    ClarificationSnapshot,
+    FlushOutcome,
+    IngestResult,
+    StaffCaseSnapshot,
+    coerce_headers_json as _coerce_headers_json,
+    coerce_msg_id as _coerce_msg_id,
+    coerce_str as _coerce_str,
+    default_same_case_adapter as _default_same_case_adapter,
+    utc_iso as _utc_iso,
+)
 
-SCHEMA_VERSION = 3
 DEFAULT_QUIET_SECONDS = 3.0
 DEFAULT_MAX_WAIT_SECONDS = 10.0
 DEFAULT_MERGE_ENABLED = False
@@ -23,359 +33,6 @@ DEFAULT_RETENTION_SECONDS = 7 * 24 * 3600
 DEFAULT_CLARIFICATION_TTL_SECONDS = 1800.0
 
 SameCaseMatcher = Callable[[str, dict[str, Any], float], tuple[bool, str]]
-
-
-def _utc_iso(epoch_seconds: float) -> str:
-    return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat(timespec="seconds")
-
-
-def _coerce_str(value: Any) -> str:
-    return value if isinstance(value, str) else ""
-
-
-def _coerce_msg_id(value: Any) -> str:
-    if isinstance(value, str):
-        return value.strip()
-    if type(value) is int:
-        return str(value)
-    return ""
-
-
-def _coerce_headers_json(value: Any) -> str:
-    if not isinstance(value, dict):
-        return "{}"
-    cleaned = {
-        str(k): str(v)
-        for k, v in value.items()
-        if isinstance(k, str) and isinstance(v, str)
-    }
-    return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
-
-
-def _default_same_case_adapter(
-    merged_text: str, open_case: dict[str, Any], now_epoch: float
-) -> tuple[bool, str]:
-    return default_same_case_matcher(merged_text, open_case, now_epoch=now_epoch)
-
-
-@dataclass(frozen=True, slots=True)
-class StaffCaseSnapshot:
-    """Serializable summary of an open or closed staff case / to-do."""
-
-    case_id: int
-    account_id: str
-    reader_id: str
-    case_kind: str
-    status: str
-    summary: str
-    latest_message: str
-    created_at_utc: str
-    updated_at_utc: str
-    updated_at_epoch: float
-    closed_at_utc: str | None = None
-    resolution_note: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "case_id": self.case_id,
-            "account_id": self.account_id,
-            "reader_id": self.reader_id,
-            "case_kind": self.case_kind,
-            "status": self.status,
-            "summary": self.summary,
-            "latest_message": self.latest_message,
-            "created_at_utc": self.created_at_utc,
-            "updated_at_utc": self.updated_at_utc,
-            "updated_at_epoch": self.updated_at_epoch,
-            "closed_at_utc": self.closed_at_utc,
-            "resolution_note": self.resolution_note,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class BatchSnapshot:
-    """Current state of one merge batch."""
-
-    batch_id: int
-    account_id: str
-    reader_id: str
-    status: str
-    first_received_at_epoch: float
-    last_received_at_epoch: float
-    quiet_deadline_epoch: float
-    max_deadline_epoch: float
-    flush_at_epoch: float
-    message_count: int
-    merged_text: str | None
-    flushed_at_epoch: float | None
-    route_stage: str
-    staff_case_id: int | None
-    generation: int = 1
-    preempt_count: int = 0
-    preempt_locked: bool = False
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "batch_id": self.batch_id,
-            "account_id": self.account_id,
-            "reader_id": self.reader_id,
-            "status": self.status,
-            "first_received_at_epoch": self.first_received_at_epoch,
-            "last_received_at_epoch": self.last_received_at_epoch,
-            "quiet_deadline_epoch": self.quiet_deadline_epoch,
-            "max_deadline_epoch": self.max_deadline_epoch,
-            "flush_at_epoch": self.flush_at_epoch,
-            "message_count": self.message_count,
-            "merged_text": self.merged_text,
-            "flushed_at_epoch": self.flushed_at_epoch,
-            "route_stage": self.route_stage,
-            "staff_case_id": self.staff_case_id,
-            "generation": self.generation,
-            "preempt_count": self.preempt_count,
-            "preempt_locked": self.preempt_locked,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class FlushOutcome:
-    """Result returned whenever a merge batch finishes flushing."""
-
-    batch: BatchSnapshot
-    event_seqs: tuple[int, ...]
-    route_stage: str
-    staff_case_id: int | None = None
-    same_case_reason: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "batch": self.batch.to_dict(),
-            "event_seqs": list(self.event_seqs),
-            "route_stage": self.route_stage,
-            "staff_case_id": self.staff_case_id,
-            "same_case_reason": self.same_case_reason,
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class IngestResult:
-    """Outcome of recording an inbound event and running Filter + Merge enqueue."""
-
-    duplicate: bool
-    seq: int
-    received_at_epoch: float
-    filter_decision: FilterDecision
-    batch: BatchSnapshot | None = None
-    feedback_id: int | None = None
-    staff_case_id: int | None = None
-    pre_flushed: tuple[FlushOutcome, ...] = ()
-    preempted_batch_id: int | None = None
-    queued_behind_batch_id: int | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ClarificationSnapshot:
-    """Active or historical single-turn clarification record for a reader."""
-
-    clarify_id: int
-    account_id: str
-    reader_id: str
-    status: str
-    original_batch_id: int | None
-    original_question: str
-    clarify_prompt: str
-    attempt_count: int
-    asked_at_epoch: float
-    asked_at_utc: str
-    expires_at_epoch: float
-    consumed_at_utc: str | None = None
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "clarify_id": self.clarify_id,
-            "account_id": self.account_id,
-            "reader_id": self.reader_id,
-            "status": self.status,
-            "original_batch_id": self.original_batch_id,
-            "original_question": self.original_question,
-            "clarify_prompt": self.clarify_prompt,
-            "attempt_count": self.attempt_count,
-            "asked_at_epoch": self.asked_at_epoch,
-            "asked_at_utc": self.asked_at_utc,
-            "expires_at_epoch": self.expires_at_epoch,
-            "consumed_at_utc": self.consumed_at_utc,
-        }
-
-
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS schema_meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS feedback_records (
-    feedback_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    event_seq INTEGER,
-    created_at_epoch REAL NOT NULL,
-    created_at_utc TEXT NOT NULL,
-    content TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'recorded',
-    staff_note TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS staff_cases (
-    case_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    source_batch_id INTEGER,
-    source_event_seq INTEGER,
-    case_kind TEXT NOT NULL DEFAULT 'staff_todo',
-    status TEXT NOT NULL DEFAULT 'open',
-    summary TEXT NOT NULL,
-    latest_message TEXT NOT NULL,
-    created_at_epoch REAL NOT NULL,
-    created_at_utc TEXT NOT NULL,
-    updated_at_epoch REAL NOT NULL,
-    updated_at_utc TEXT NOT NULL,
-    closed_at_utc TEXT,
-    resolution_note TEXT NOT NULL DEFAULT ''
-);
-
-CREATE INDEX IF NOT EXISTS idx_staff_cases_open_reader
-    ON staff_cases(account_id, reader_id, status, updated_at_epoch);
-
-CREATE TABLE IF NOT EXISTS merge_batches (
-    batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    first_received_at_epoch REAL NOT NULL,
-    last_received_at_epoch REAL NOT NULL,
-    quiet_deadline_epoch REAL NOT NULL,
-    max_deadline_epoch REAL NOT NULL,
-    flush_at_epoch REAL NOT NULL,
-    message_count INTEGER NOT NULL DEFAULT 0,
-    merged_text TEXT,
-    flushed_at_epoch REAL,
-    route_stage TEXT NOT NULL DEFAULT 'pending',
-    staff_case_id INTEGER REFERENCES staff_cases(case_id),
-    generation INTEGER NOT NULL DEFAULT 1,
-    preempt_count INTEGER NOT NULL DEFAULT 0,
-    preempt_locked INTEGER NOT NULL DEFAULT 0
-);
-
-CREATE INDEX IF NOT EXISTS idx_merge_status_flush
-    ON merge_batches(status, flush_at_epoch);
-
-CREATE TABLE IF NOT EXISTS inbound_events (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    dedup_key TEXT UNIQUE,
-    transport TEXT NOT NULL,
-    received_at_epoch REAL NOT NULL,
-    received_at_utc TEXT NOT NULL,
-    create_time TEXT NOT NULL,
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    msg_type TEXT NOT NULL,
-    event TEXT NOT NULL,
-    msg_id TEXT,
-    content TEXT NOT NULL,
-    filter_category TEXT NOT NULL,
-    filter_reason TEXT NOT NULL,
-    batch_id INTEGER REFERENCES merge_batches(batch_id),
-    staff_case_id INTEGER REFERENCES staff_cases(case_id),
-    feedback_id INTEGER REFERENCES feedback_records(feedback_id),
-    client_ip TEXT NOT NULL,
-    wx_headers_json TEXT NOT NULL,
-    raw_body TEXT NOT NULL,
-    expires_at_epoch REAL
-);
-
-CREATE INDEX IF NOT EXISTS idx_inbound_reader_time
-    ON inbound_events(account_id, reader_id, received_at_epoch);
-
-CREATE INDEX IF NOT EXISTS idx_inbound_category
-    ON inbound_events(filter_category, seq);
-
-CREATE TABLE IF NOT EXISTS batch_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER NOT NULL REFERENCES merge_batches(batch_id),
-    event_seq INTEGER NOT NULL UNIQUE REFERENCES inbound_events(seq),
-    received_at_epoch REAL NOT NULL,
-    text_content TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_batch_messages_order
-    ON batch_messages(batch_id, received_at_epoch, event_seq);
-
-CREATE TABLE IF NOT EXISTS staff_case_messages (
-    item_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    case_id INTEGER NOT NULL REFERENCES staff_cases(case_id),
-    batch_id INTEGER REFERENCES merge_batches(batch_id),
-    event_seq INTEGER REFERENCES inbound_events(seq),
-    sender_role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    created_at_epoch REAL NOT NULL,
-    created_at_utc TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS outbound_replies (
-    reply_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    trigger_kind TEXT NOT NULL,
-    trigger_ref_id INTEGER,
-    content TEXT NOT NULL,
-    delivery_mode TEXT NOT NULL,
-    status TEXT NOT NULL,
-    errcode INTEGER,
-    errmsg TEXT NOT NULL DEFAULT '',
-    duration_ms INTEGER,
-    created_at_epoch REAL NOT NULL,
-    created_at_utc TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS clarification_states (
-    clarify_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    status TEXT NOT NULL,
-    original_batch_id INTEGER REFERENCES merge_batches(batch_id),
-    original_question TEXT NOT NULL,
-    clarify_prompt TEXT NOT NULL,
-    attempt_count INTEGER NOT NULL DEFAULT 1,
-    asked_at_epoch REAL NOT NULL,
-    asked_at_utc TEXT NOT NULL,
-    expires_at_epoch REAL NOT NULL,
-    consumed_at_utc TEXT
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_clarify_active_reader
-    ON clarification_states(account_id, reader_id)
-    WHERE status = 'awaiting_reply';
-
-CREATE TABLE IF NOT EXISTS triage_runs (
-    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_id INTEGER NOT NULL REFERENCES merge_batches(batch_id),
-    account_id TEXT NOT NULL,
-    reader_id TEXT NOT NULL,
-    generation INTEGER NOT NULL DEFAULT 1,
-    clarified_already INTEGER NOT NULL DEFAULT 0,
-    stage_path TEXT NOT NULL,
-    decision_route TEXT NOT NULL DEFAULT '',
-    decision_preset_id TEXT NOT NULL DEFAULT '',
-    decision_confidence REAL,
-    decision_duration_ms INTEGER,
-    preset_id TEXT NOT NULL DEFAULT '',
-    source_url TEXT NOT NULL DEFAULT '',
-    section_title TEXT NOT NULL DEFAULT '',
-    reply_preview TEXT NOT NULL DEFAULT '',
-    staff_case_id INTEGER REFERENCES staff_cases(case_id),
-    created_at_epoch REAL NOT NULL,
-    created_at_utc TEXT NOT NULL
-);
-"""
 
 
 class SupportStore:
@@ -642,54 +299,23 @@ class SupportStore:
                     batch_snapshot = self.get_batch(batch_id)
 
                 elif decision.category == "feedback":
-                    fb_cursor = self._conn.execute(
-                        """
-                        INSERT INTO feedback_records(
-                            account_id, reader_id, event_seq, created_at_epoch, created_at_utc, content
-                        ) VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (account_id, reader_id, seq, now_epoch, now_utc, decision.normalized_text),
-                    )
-                    feedback_id = int(fb_cursor.lastrowid)
-                    self._conn.execute(
-                        "UPDATE inbound_events SET feedback_id = ? WHERE seq = ?",
-                        (feedback_id, seq),
+                    feedback_id = self._record_feedback_locked(
+                        account_id=account_id,
+                        reader_id=reader_id,
+                        seq=seq,
+                        content=decision.normalized_text,
+                        now_epoch=now_epoch,
+                        now_utc=now_utc,
                     )
 
                 elif decision.category == "emergency":
-                    summary = decision.normalized_text[:120]
-                    case_cursor = self._conn.execute(
-                        """
-                        INSERT INTO staff_cases(
-                            account_id, reader_id, source_event_seq, case_kind, status,
-                            summary, latest_message, created_at_epoch, created_at_utc,
-                            updated_at_epoch, updated_at_utc
-                        ) VALUES (?, ?, ?, 'emergency', 'open', ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            account_id,
-                            reader_id,
-                            seq,
-                            summary,
-                            decision.normalized_text,
-                            now_epoch,
-                            now_utc,
-                            now_epoch,
-                            now_utc,
-                        ),
-                    )
-                    staff_case_id = int(case_cursor.lastrowid)
-                    self._conn.execute(
-                        """
-                        INSERT INTO staff_case_messages(
-                            case_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
-                        ) VALUES (?, ?, 'reader', ?, ?, ?)
-                        """,
-                        (staff_case_id, seq, decision.normalized_text, now_epoch, now_utc),
-                    )
-                    self._conn.execute(
-                        "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
-                        (staff_case_id, seq),
+                    staff_case_id = self._record_emergency_locked(
+                        account_id=account_id,
+                        reader_id=reader_id,
+                        seq=seq,
+                        content=decision.normalized_text,
+                        now_epoch=now_epoch,
+                        now_utc=now_utc,
                     )
 
             self._enforce_permissions()
@@ -705,6 +331,76 @@ class SupportStore:
                 preempted_batch_id=preempted_batch_id,
                 queued_behind_batch_id=queued_behind_batch_id,
             )
+
+    def _record_feedback_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        seq: int,
+        content: str,
+        now_epoch: float,
+        now_utc: str,
+    ) -> int:
+        fb_cursor = self._conn.execute(
+            """
+            INSERT INTO feedback_records(
+                account_id, reader_id, event_seq, created_at_epoch, created_at_utc, content
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (account_id, reader_id, seq, now_epoch, now_utc, content),
+        )
+        feedback_id = int(fb_cursor.lastrowid)
+        self._conn.execute(
+            "UPDATE inbound_events SET feedback_id = ? WHERE seq = ?",
+            (feedback_id, seq),
+        )
+        return feedback_id
+
+    def _record_emergency_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        seq: int,
+        content: str,
+        now_epoch: float,
+        now_utc: str,
+    ) -> int:
+        case_cursor = self._conn.execute(
+            """
+            INSERT INTO staff_cases(
+                account_id, reader_id, source_event_seq, case_kind, status,
+                summary, latest_message, created_at_epoch, created_at_utc,
+                updated_at_epoch, updated_at_utc
+            ) VALUES (?, ?, ?, 'emergency', 'open', ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                account_id,
+                reader_id,
+                seq,
+                content[:120],
+                content,
+                now_epoch,
+                now_utc,
+                now_epoch,
+                now_utc,
+            ),
+        )
+        staff_case_id = int(case_cursor.lastrowid)
+        self._conn.execute(
+            """
+            INSERT INTO staff_case_messages(
+                case_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
+            ) VALUES (?, ?, 'reader', ?, ?, ?)
+            """,
+            (staff_case_id, seq, content, now_epoch, now_utc),
+        )
+        self._conn.execute(
+            "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
+            (staff_case_id, seq),
+        )
+        return staff_case_id
 
     def _append_batch_message_locked(
         self,
@@ -1434,52 +1130,32 @@ class SupportStore:
 
     def list_events(self, *, limit: int = 20, category: str | None = None) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 200))
+        where_sql = "WHERE filter_category = ?" if category else ""
+        params: tuple[Any, ...] = (category, bounded) if category else (bounded,)
         with self._lock:
-            if category:
-                rows = self._conn.execute(
-                    """
-                    SELECT seq, received_at_utc, received_at_epoch, transport, account_id, reader_id,
-                           msg_type, event, msg_id, content, filter_category, filter_reason,
-                           batch_id, staff_case_id, feedback_id
-                    FROM inbound_events
-                    WHERE filter_category = ?
-                    ORDER BY seq DESC
-                    LIMIT ?
-                    """,
-                    (category, bounded),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    """
-                    SELECT seq, received_at_utc, received_at_epoch, transport, account_id, reader_id,
-                           msg_type, event, msg_id, content, filter_category, filter_reason,
-                           batch_id, staff_case_id, feedback_id
-                    FROM inbound_events
-                    ORDER BY seq DESC
-                    LIMIT ?
-                    """,
-                    (bounded,),
-                ).fetchall()
+            rows = self._conn.execute(
+                f"""
+                SELECT seq, received_at_utc, received_at_epoch, transport, account_id, reader_id,
+                       msg_type, event, msg_id, content, filter_category, filter_reason,
+                       batch_id, staff_case_id, feedback_id
+                FROM inbound_events
+                {where_sql}
+                ORDER BY seq DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
             return [dict(row) for row in rows]
 
     def list_batches(self, *, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 200))
+        where_sql = "WHERE status = ?" if status else ""
+        params: tuple[Any, ...] = (status, bounded) if status else (bounded,)
         with self._lock:
-            if status:
-                rows = self._conn.execute(
-                    """
-                    SELECT * FROM merge_batches
-                    WHERE status = ?
-                    ORDER BY batch_id DESC
-                    LIMIT ?
-                    """,
-                    (status, bounded),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT * FROM merge_batches ORDER BY batch_id DESC LIMIT ?",
-                    (bounded,),
-                ).fetchall()
+            rows = self._conn.execute(
+                f"SELECT * FROM merge_batches {where_sql} ORDER BY batch_id DESC LIMIT ?",
+                params,
+            ).fetchall()
             return [self._row_to_batch(row).to_dict() for row in rows]
 
     def list_feedbacks(self, *, limit: int = 20) -> list[dict[str, Any]]:
@@ -1498,26 +1174,18 @@ class SupportStore:
 
     def list_staff_cases(self, *, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 200))
+        where_sql = "WHERE status = ?" if status else ""
+        params: tuple[Any, ...] = (status, bounded) if status else (bounded,)
         with self._lock:
-            if status:
-                rows = self._conn.execute(
-                    """
-                    SELECT * FROM staff_cases
-                    WHERE status = ?
-                    ORDER BY updated_at_epoch DESC, case_id DESC
-                    LIMIT ?
-                    """,
-                    (status, bounded),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    """
-                    SELECT * FROM staff_cases
-                    ORDER BY updated_at_epoch DESC, case_id DESC
-                    LIMIT ?
-                    """,
-                    (bounded,),
-                ).fetchall()
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM staff_cases
+                {where_sql}
+                ORDER BY updated_at_epoch DESC, case_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
             cases = [self._row_to_case(row).to_dict() for row in rows]
             for item in cases:
                 msgs = self._conn.execute(

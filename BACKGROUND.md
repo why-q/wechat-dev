@@ -4,34 +4,39 @@
 
 本人在汕头大学图书馆负责数字化建设相关工作，具体职责目前就是负责 AI 应用方面的开发。
 
-本项目起因是图书馆读者投诉较多，据观察大部分与未充分了解图书馆规章有关（暂无投诉分类和数量统计可用于量化），希望先由 AI 解答有公开依据的通用问题（实现中），其余无法回答的问题（或无信心回答的问题）再转接人工（转接部分尚未实现）。
+本项目起因是图书馆读者投诉较多，据观察大部分与未充分了解图书馆规章有关（暂无投诉分类和数量统计可用于量化）。目前已落地两段式自动客服主体（第 1–3 步：微信云托管极简转发 + 自建服务器 Filter / SQLite / 即时抢占与合批 / Tier 1 别名与 `/v1/systemone` 决策 / Tier 2 仅 `0.` 语料 RAG 引用 / `Feedback` 与 `Emergency` / `Fallback` 馆员待办创建、追加与 API 结案），正在测试白名单范围内真机运行；第 4 步人机协同 Dashboard 界面与离线评测导出待接续完善。
 
 | 渠道 | 已知情况 | 本次范围 |
 |---|---|---|
 | 客服投诉 | 存在独立渠道，系统及接入方式尚未说明 | 业务目标之一，尚未开展技术核实 |
 | 校长邮箱投诉 | 图书馆无访问权限 | 暂不作为本次重点 |
-| 公众号投诉或咨询 | 读者在公众号聊天框发私信，工作人员通过微信公众平台自带后台处理 | 当前通过云托管消息推送接入 |
+| 公众号投诉或咨询 | 读者在公众号聊天框发私信，工作人员通过微信公众平台自带后台处理 | 已通过云托管 2 变量转发至自建服务器 `wechat-relay.service` 处理，并通过白名单灰度直连 `custom/send` |
 
 注意：公众号入口暂时不含文章底部评论，不使用第三方客服。
 
 ## 2. 数据范围
 
-答案以图书馆公开文档为依据，包括图书馆主页和公众号文章等。早期 RAG 基线使用 4 份资料，本次客服设计依据更新后的 11 份 corpus 文档。服务范围限通用问题和公开自助指引，个人业务情况由馆员或读者本人核实。
+答案以图书馆公开文档为依据，包括图书馆主页和公众号文章等。早期 PoC 基线使用 4 份资料（对应 `rag-poc/index/`）；当前生产语料按前缀三分法管理共 11 份 Markdown 文档（`rag-poc/corpus/`）：
+- `1.*.md`（3 份：`图书续借`、`图书预约`、`开馆时间`）：仅作 Tier 1 固定答案与 YAML 别名精确匹配，不入向量库。
+- `0.*.md`（5 份：`咨询台`、`常见问题`、`服务项目`、`联系我们`、`规章制度`）：唯一进入 Tier 2 向量库（`rag-poc/index_v2/`，66 个带 `source` 与完整 `header_path` 的块）。
+- `9.*.md`（3 份：`学科馆员`、`本馆简介`、`机构设置`）：背景资料，不纳入自动客服检索。
+
+服务范围限通用问题和公开自助指引，个人业务情况由馆员核实处理（目前 `0.` 语料对部分新业务如“静音舱/座位预约”尚有覆盖缺口，已由真实测试触发兜底并待第 4 步前补全）。
 
 仍需区分两类诉求：
 
 - 咨询规定：公开文档可能足以回答。
-- 投诉处理、对规定有异议、需要工作人员采取行动：即使文档有规定，也不能据此判定投诉已解决，需要转人工。
+- 投诉处理、对规定有异议、需要工作人员采取行动：即使文档有规定，也不能据此判定投诉已解决，需要生成馆员待办转人工。
 
-公众号收发消息仍涉及 OpenID 和消息正文，后续需决定日志、保存期限和对外模型调用的数据边界，初期实验阶段暂不考虑。
+公众号收发消息涉及 OpenID 和消息正文，当前在自有服务器受限 SQLite 中为 `inbound_events` 设置 7 天过期字段 `expires_at_epoch`，日志严格脱敏不落盘正文与 OpenID。
 
 ## 3. 开发环境
 
-在当前服务器进行开发并使用 GitHub 进行版本管理，使用微信云托管将最新代码版本从 GitHub 同步到微信托管服务器上进行服务更新。
+在自建服务器进行开发并使用 GitHub（`master -> origin/main`）进行版本管理。微信云托管仅同步 [app.py](app.py) 作为 `2` 变量极简消息转发器（`WECHAT_FORWARD_URL`、`WECHAT_FORWARD_TOKEN`）；所有业务代码与模型/微信运行配置集中放在自有服务器的 `wechat-relay.service`、Nginx（`wechat-dev.llink.cyou`）与 `/etc/wechat-relay.env`（`0600`）。
 
 ## 4. 测试环境
 
-除项目自带测试之外，使用正式微信服务号人工进行真实测试（链路已经过测试，无问题）。
+除本地自动化单元测试外（`tests/` 与 `rag-poc/tests/`），使用正式微信公众号与自建服务器 `SUPPORT_AUTO_REPLY_ENABLED=true` + `SUPPORT_AUTO_REPLY_ALLOWLIST` 进行受控真机测试（仅白名单 OpenID 真实收到 `custom/send` 回复，其余读者保持全流程 `shadow` 模式记录，链路经多次实机验证正常）。
 
 ## 5. 历史记录
 
@@ -78,6 +83,7 @@
 - **2026-11-26 · 线上影子闭环校准**：真机实测验证了 `图书续借出问题了`（Tier 1 选 `public_qa+none` 进 Tier 2 追问）、`提示图书已逾期了，还能续借吗`（消耗澄清并引用 `0. 常见问题` 作答）与 `开馆时间？`（精确别名同秒直返）；同时观测到 3 次 `/v1/systemone` 真实调用耗时 `1407–1975 ms` 贴近 `2s` 上限，且常规提问「借来的书快到期了能延期几天呀」被过度澄清。据此把 `SUPPORT_DECISION_TIMEOUT_SECONDS` 默认值按实测校准为 `3.0s`，并收窄 `clarify` 判据仅在核心业务高度歧义时触发。
 - **2026-11-26 · 测试白名单实发机制（`SUPPORT_AUTO_REPLY_ALLOWLIST`）**：真机跑通全部分支（含 `Feedback`、`Emergency`、`staff_action` 超时降级、`Same Unresolved Staff Case?` 追加与结案、`/relay/send-test` 手机真实收件 `errcode=0`）后，确认微信同服务号同微信号下 `OpenID` 永久固定，新增 `SUPPORT_AUTO_REPLY_ALLOWLIST` 环境变量：开启 `SUPPORT_AUTO_REPLY_ENABLED=true` 时仅白名单内 `OpenID` 实发微信客服消息，其余读者仍走完整流程并记为 `status='shadow'`。
 - **2026-11-27 · 云托管环境变量极简化与服务端配置收敛**：鉴于微信云托管只负责消息转发，调整 [app.py](app.py) 在仅配置 `WECHAT_FORWARD_URL` 且未设置 `WECHAT_TOKEN` 时自动推导纯转发默认值（`WECHAT_CLOUD_PUSH_ENABLED=true`、`WECHAT_AUTO_REPLY_ENABLED=false`、`DASHBOARD_ENABLED=false`），同时将可选的 `WECHAT_CLOUD_EXPECTED_SOURCE/ENV/APPID` 校验下沉到 [relay_receiver.py](relay_receiver.py) 对 `wx_headers` 的检查，并将业务运行环境变量统一收敛到自建服务器 `/etc/wechat-relay.env`（[wechat-relay.service](wechat-relay.service) 单一 `EnvironmentFile`，模板见 [wechat-relay.env.example](deploy/wechat-relay.env.example)），使云托管控制台仅需保留 `WECHAT_FORWARD_URL` 与 `WECHAT_FORWARD_TOKEN` 两项。
+- **2026-11-27 · 代码结构整理与全局文档同步**：抽离 [support_backend/schema.py](support_backend/schema.py)（SQLite DDL 与快照数据类）和 [support_backend/shared.py](support_backend/shared.py)（公共环境变量、UTF-8 截断与脱敏工具），消除 [relay_receiver.py](relay_receiver.py)、[pipeline.py](support_backend/pipeline.py)、[responder.py](support_backend/responder.py) 与 [db.py](support_backend/db.py) 间的重复逻辑并将 Tier 2 澄清生成封装回 `Tier2KnowledgeResponder`；同时重写过时的 [README.md](README.md) 并全面对齐各阶段文档与 [BACKGROUND.md](BACKGROUND.md) 现状。
 
 ## Reference
 

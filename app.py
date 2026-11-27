@@ -150,6 +150,7 @@ def _rag_failure_details(exc: Exception, fallback_code: str) -> tuple[str, str, 
     return fallback_code, "RAG 查询遇到未分类错误。", type(exc).__name__
 
 
+# Self-contained UTF-8 bounding helper (app.py runs standalone inside the Cloud Hosting image).
 def _truncate_utf8(text: str, byte_limit: int) -> str:
     if byte_limit <= 0:
         return ""

@@ -61,13 +61,20 @@ def build_systemone_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, target_path, "", ""))
 
 
+def _coerce_float(raw: object) -> float | None:
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return float(raw)
+    return None
+
+
 def _parse_prob_map(raw: object) -> dict[str, float] | None:
     if not isinstance(raw, dict):
         return None
     parsed: dict[str, float] = {}
     for k, v in raw.items():
-        if isinstance(k, str) and isinstance(v, (int, float)) and not isinstance(v, bool):
-            parsed[k] = float(v)
+        val = _coerce_float(v)
+        if isinstance(k, str) and val is not None:
+            parsed[k] = val
     return parsed
 
 
@@ -81,18 +88,12 @@ def _parse_answer(raw: object) -> DecisionAnswer:
         choice_val = raw.get("answer")
     if choice_val is None and isinstance(raw.get("label"), str):
         choice_val = raw.get("label")
-    conf_raw = raw.get("confidence")
-    conf_val = float(conf_raw) if isinstance(conf_raw, (int, float)) and not isinstance(conf_raw, bool) else None
-    prob_raw = raw.get("probability")
-    prob_val = float(prob_raw) if isinstance(prob_raw, (int, float)) and not isinstance(prob_raw, bool) else None
-    score_raw = raw.get("score")
-    score_val = float(score_raw) if isinstance(score_raw, (int, float)) and not isinstance(score_raw, bool) else None
     return DecisionAnswer(
         choice=str(choice_val) if isinstance(choice_val, str) else None,
-        confidence=conf_val,
+        confidence=_coerce_float(raw.get("confidence")),
         probabilities=_parse_prob_map(raw.get("probabilities")),
-        probability=prob_val,
-        score=score_val,
+        probability=_coerce_float(raw.get("probability")),
+        score=_coerce_float(raw.get("score")),
     )
 
 

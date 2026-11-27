@@ -78,6 +78,34 @@ class SupportResponder:
         self.preset_min_confidence = float(preset_min_confidence)
         self.clarify_ttl_seconds = float(clarify_ttl_seconds)
 
+    @staticmethod
+    def _fallback_plan(
+        *,
+        stage_path: str,
+        trigger_kind: str,
+        clarified_already: bool,
+        combined_question: str,
+        decision_route: str,
+        decision_preset_id: str,
+        decision_confidence: float | None,
+        decision_duration_ms: int | None,
+        create_staff_todo: bool = True,
+    ) -> TriagePlan:
+        return TriagePlan(
+            stage_path=stage_path,
+            clarified_already=clarified_already,
+            combined_question=combined_question,
+            reply_text=FALLBACK_TEMPLATE_REPLY,
+            trigger_kind=trigger_kind,
+            decision_route=decision_route,
+            decision_preset_id=decision_preset_id,
+            decision_confidence=decision_confidence,
+            decision_duration_ms=decision_duration_ms,
+            consume_clarification=clarified_already,
+            create_staff_todo=create_staff_todo,
+            staff_summary=combined_question[:120] if create_staff_todo else "",
+        )
+
     async def triage(self, outcome: FlushOutcome) -> TriagePlan:
         """Determine the exact answer/clarify/fallback plan without mutating durable state."""
         if outcome.route_stage == "staff_case_appended":
@@ -115,7 +143,7 @@ class SupportResponder:
                 consume_clarification=clarified_already,
             )
 
-        # Tier 1b: `/v1/systemone` multi-question `Choice` decision (2s bounded).
+        # Tier 1b: `/v1/systemone` multi-question `Choice` decision (default 3.0s bounded).
         decision_route = "unconfigured"
         decision_preset_id = ""
         decision_confidence: float | None = None
@@ -153,51 +181,43 @@ class SupportResponder:
                 )
 
         if decision_route == "staff_action":
-            return TriagePlan(
+            return self._fallback_plan(
                 stage_path="decision_staff",
+                trigger_kind="fallback_staff",
                 clarified_already=clarified_already,
                 combined_question=combined_question,
-                reply_text=FALLBACK_TEMPLATE_REPLY,
-                trigger_kind="fallback_staff",
                 decision_route=decision_route,
                 decision_preset_id=decision_preset_id,
                 decision_confidence=decision_confidence,
                 decision_duration_ms=decision_duration_ms,
-                consume_clarification=clarified_already,
                 create_staff_todo=True,
-                staff_summary=combined_question[:120],
             )
 
         if decision_route == "unknown":
-            return TriagePlan(
+            return self._fallback_plan(
                 stage_path="decision_unknown_fallback",
+                trigger_kind="fallback_unknown",
                 clarified_already=clarified_already,
                 combined_question=combined_question,
-                reply_text=FALLBACK_TEMPLATE_REPLY,
-                trigger_kind="fallback_unknown",
                 decision_route=decision_route,
                 decision_preset_id=decision_preset_id,
                 decision_confidence=decision_confidence,
                 decision_duration_ms=decision_duration_ms,
-                consume_clarification=clarified_already,
                 create_staff_todo=False,
             )
 
         if decision_route == "clarify":
             if clarified_already:
-                return TriagePlan(
+                return self._fallback_plan(
                     stage_path="clarify_limit_fallback",
+                    trigger_kind="fallback_clarify_limit",
                     clarified_already=True,
                     combined_question=combined_question,
-                    reply_text=FALLBACK_TEMPLATE_REPLY,
-                    trigger_kind="fallback_clarify_limit",
                     decision_route=decision_route,
                     decision_preset_id=decision_preset_id,
                     decision_confidence=decision_confidence,
                     decision_duration_ms=decision_duration_ms,
-                    consume_clarification=True,
                     create_staff_todo=True,
-                    staff_summary=combined_question[:120],
                 )
             clarify_q = await self._generate_clarify_question(combined_question)
             return TriagePlan(
@@ -338,20 +358,19 @@ class SupportResponder:
         decision_confidence: float | None,
         decision_duration_ms: int | None,
     ) -> TriagePlan:
+        fallback_kwargs: dict[str, Any] = {
+            "clarified_already": clarified_already,
+            "combined_question": combined_question,
+            "decision_route": decision_route,
+            "decision_preset_id": decision_preset_id,
+            "decision_confidence": decision_confidence,
+            "decision_duration_ms": decision_duration_ms,
+        }
         if self.knowledge_responder is None:
-            return TriagePlan(
+            return self._fallback_plan(
                 stage_path="tier2_unavailable_fallback",
-                clarified_already=clarified_already,
-                combined_question=combined_question,
-                reply_text=FALLBACK_TEMPLATE_REPLY,
                 trigger_kind="fallback_tier2_unavailable",
-                decision_route=decision_route,
-                decision_preset_id=decision_preset_id,
-                decision_confidence=decision_confidence,
-                decision_duration_ms=decision_duration_ms,
-                consume_clarification=clarified_already,
-                create_staff_todo=True,
-                staff_summary=combined_question[:120],
+                **fallback_kwargs,
             )
         try:
             result = await asyncio.to_thread(
@@ -360,37 +379,15 @@ class SupportResponder:
                 clarification_context=clarification_context,
                 allow_clarify=not clarified_already,
             )
-        except KnowledgeError as exc:
-            _LOGGER.warning("Tier 2 RAG failed: batch_id=%d code=%s", batch_id, exc.code)
-            return TriagePlan(
-                stage_path="tier2_error_fallback",
-                clarified_already=clarified_already,
-                combined_question=combined_question,
-                reply_text=FALLBACK_TEMPLATE_REPLY,
-                trigger_kind="fallback_tier2_error",
-                decision_route=decision_route,
-                decision_preset_id=decision_preset_id,
-                decision_confidence=decision_confidence,
-                decision_duration_ms=decision_duration_ms,
-                consume_clarification=clarified_already,
-                create_staff_todo=True,
-                staff_summary=combined_question[:120],
-            )
         except Exception as exc:
-            _LOGGER.warning("Tier 2 RAG unexpected error: batch_id=%d reason=%s", batch_id, type(exc).__name__)
-            return TriagePlan(
+            if isinstance(exc, KnowledgeError):
+                _LOGGER.warning("Tier 2 RAG failed: batch_id=%d code=%s", batch_id, exc.code)
+            else:
+                _LOGGER.warning("Tier 2 RAG unexpected error: batch_id=%d reason=%s", batch_id, type(exc).__name__)
+            return self._fallback_plan(
                 stage_path="tier2_error_fallback",
-                clarified_already=clarified_already,
-                combined_question=combined_question,
-                reply_text=FALLBACK_TEMPLATE_REPLY,
                 trigger_kind="fallback_tier2_error",
-                decision_route=decision_route,
-                decision_preset_id=decision_preset_id,
-                decision_confidence=decision_confidence,
-                decision_duration_ms=decision_duration_ms,
-                consume_clarification=clarified_already,
-                create_staff_todo=True,
-                staff_summary=combined_question[:120],
+                **fallback_kwargs,
             )
 
         if result.outcome == "answered":
@@ -425,34 +422,16 @@ class SupportResponder:
             )
 
         if result.outcome == "staff_action":
-            return TriagePlan(
+            return self._fallback_plan(
                 stage_path="tier2_staff",
-                clarified_already=clarified_already,
-                combined_question=combined_question,
-                reply_text=FALLBACK_TEMPLATE_REPLY,
                 trigger_kind="fallback_staff",
-                decision_route=decision_route,
-                decision_preset_id=decision_preset_id,
-                decision_confidence=decision_confidence,
-                decision_duration_ms=decision_duration_ms,
-                consume_clarification=clarified_already,
-                create_staff_todo=True,
-                staff_summary=combined_question[:120],
+                **fallback_kwargs,
             )
 
-        return TriagePlan(
+        return self._fallback_plan(
             stage_path="tier2_fallback",
-            clarified_already=clarified_already,
-            combined_question=combined_question,
-            reply_text=FALLBACK_TEMPLATE_REPLY,
             trigger_kind="fallback_unsupported",
-            decision_route=decision_route,
-            decision_preset_id=decision_preset_id,
-            decision_confidence=decision_confidence,
-            decision_duration_ms=decision_duration_ms,
-            consume_clarification=clarified_already,
-            create_staff_todo=True,
-            staff_summary=combined_question[:120],
+            **fallback_kwargs,
         )
 
     async def apply_committed_plan(

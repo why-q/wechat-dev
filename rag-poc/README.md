@@ -1,5 +1,8 @@
 # 公众号馆藏 RAG 与离线 PoC
 
+> [!NOTE]
+> 本目录提供离线 RAG PoC CLI（`rag_poc.cli` -> 默认 `rag-poc/index/`）以及云托管旧回滚路径。当前线上主服务 `wechat-relay.service` 使用仓库根的 [support_backend](../support_backend/)，其 Tier 2 检索通过 `rag-poc/.venv` 构建和加载仅收录 `0.` 前缀公开文档的独立索引 `rag-poc/index_v2/`（详见 [Step 3 文档](../docs/STEP3-TIER1-AND-TIER2-RAG.md)）。
+
 `rag-poc/` 是公众号馆藏 RAG 的运行代码及离线查询 CLI。公众号仅调用本目录中的 RAG responder；PoC 可用合成问题独立检索，不调用微信 API。生产服务会将真实读者问题正文与命中的馆藏片段发送到 `.env` 配置的远程模型 API；OpenID 只用于后续微信客服消息发送，不发给模型。provider 的数据区域与留存条款尚未核实。仅在获得所需数据处理授权后启用实时 RAG。公开文档片段和合成问题也会发送到远程 API。在线 responder 对每次 provider 请求设 30 秒超时且不重试；一条回答可能依次发起多次请求。发送到微信的文本保守限制在 1800 UTF-8 字节，超长回答会截短并优先保留来源编号。
 
 框架采用 LlamaIndex：默认本地 `SimpleVectorStore`，并用 LlamaIndex 的 storage context 保存向量、docstore 和 index store。PDF、TXT、Markdown 由文件 reader 抽取可读取文本；不承诺扫描件/OCR。当前 `index/` 是云托管镜像的部署产物，需随公开语料和代码提交到 GitHub；凭据、`.env`、`.venv/` 和 `.cache/` 仍不得提交到版本库。

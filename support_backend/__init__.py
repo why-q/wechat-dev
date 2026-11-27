@@ -1,17 +1,20 @@
 """Self-hosted backend package for library WeChat support pipeline."""
 
 from .db import (
-    BatchSnapshot,
-    ClarificationSnapshot,
     DEFAULT_CLARIFICATION_TTL_SECONDS,
     DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
     DEFAULT_MERGE_ENABLED,
     DEFAULT_QUIET_SECONDS,
+    SupportStore,
+)
+from .schema import (
+    SCHEMA_VERSION,
+    BatchSnapshot,
+    ClarificationSnapshot,
     FlushOutcome,
     IngestResult,
     StaffCaseSnapshot,
-    SupportStore,
 )
 from .decision_client import (
     DEFAULT_DECISION_MODEL,
@@ -75,6 +78,7 @@ __all__ = [
     "KnowledgeError",
     "PresetCatalog",
     "PresetDocument",
+    "SCHEMA_VERSION",
     "StaffCaseSnapshot",
     "SupportPipeline",
     "SupportResponder",

@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable
 
 from .db import FlushOutcome, IngestResult, SupportStore
 from .filters import EMERGENCY_CONTACT_REPLY, FEEDBACK_RECEIVED_REPLY, classify_message
+from .shared import safe_errmsg as _safe_errmsg, safe_token
 
 SendTextFn = Callable[[str, str], dict[str, Any]]
 BatchFlushedHook = Callable[[FlushOutcome], Awaitable[Any] | Any]
@@ -19,16 +20,7 @@ _LOGGER = logging.getLogger("uvicorn.error")
 
 
 def _safe_token(value: str) -> str:
-    return "".join(ch for ch in value if ch.isalnum() or ch in {"-", "_", ".", ":"})[:64]
-
-
-def _safe_errmsg(value: object) -> str:
-    if not isinstance(value, str):
-        return ""
-    cleaned = "".join(
-        ch if (ch.isascii() and (ch.isalnum() or ch in " .,:;-_/()")) else " " for ch in value
-    )
-    return " ".join(cleaned.split())[:96]
+    return safe_token(value, allow_colon=True)
 
 
 class SupportPipeline:

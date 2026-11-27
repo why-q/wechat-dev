@@ -1,5 +1,8 @@
 # WeChat question dataset capture
 
+> [!NOTE]
+> Historical one-shot `dataset-sync` (`getmsglist`) plan completed on 2026-11-25 (`WECHAT_APP_ID` / `WECHAT_APP_SECRET` direct query). Live reader intake is now active via Cloud Hosting forwarding -> [relay_receiver.py](../relay_receiver.py) -> SQLite `inbound_events` ([STEP2](STEP2-FILTER-AND-MERGE-PIPELINE.md), [STEP3](STEP3-TIER1-AND-TIER2-RAG.md)).
+
 ## Context
 
 The current service receives plaintext text messages at `/wechat`, but this data-collection step will run once as a standalone CLI against the official server-side `getmsglist` history API. That API returns customer-service records with `opercode=2003` for customer-received messages, permits at most a 24-hour time range and 10,000 records per request, and is not available through WeChat Cloud Hosting cloud calls. The CLI will fetch an explicit China-local date range, deduplicate inbound questions without retaining OpenID, and write a directly editable CSV plus a resumable local cursor. The main API keeps automatic RAG answers disabled during the real-account collection test. This touches seven tracked files and adds no database, scheduler, or runtime service.

@@ -10,19 +10,20 @@
 
 ---
 
-## SQLite 表结构（`support_backend/db.py`）
+## SQLite 表结构（`support_backend/schema.py` & `support_backend/db.py`）
 
 数据库默认路径：环境变量 `SUPPORT_DB_PATH`（若未显式设置，则落在 `RELAY_LOG_PATH` 同目录的 `library-support.db`；systemd 环境为 `/var/lib/private/wechat-relay/library-support.db`，目录 `0700`、文件 `0600`）。
 
 | 表名 | 核心字段 | 职责 |
 |---|---|---|
 | `inbound_events` | `seq`, `dedup_key UNIQUE`, `received_at_epoch`, `account_id`, `reader_id`, `msg_type`, `event`, `msg_id`, `content`, `filter_category`, `filter_reason`, `batch_id`, `staff_case_id`, `feedback_id`, `expires_at_epoch` | 全量入站审计、`msg:{account_id}:{msg_id}` 幂等去重、7 天过期时间基准（对齐 [数据集方案](RAG-DATASET-TEST-PLAN.md)）。 |
-| `merge_batches` | `batch_id`, `account_id`, `reader_id`, `status (open\|flushed)`, `first_received_at_epoch`, `last_received_at_epoch`, `quiet_deadline_epoch`, `max_deadline_epoch`, `flush_at_epoch`, `message_count`, `merged_text`, `flushed_at_epoch`, `route_stage`, `staff_case_id` | `idx_merge_open_reader` 部分唯一索引保证同一 `(account_id, reader_id)` 同时至多一个 `open` 批次。 |
+| `merge_batches` | `batch_id`, `account_id`, `reader_id`, `status (open\|processing\|queued\|flushed)`, `first_received_at_epoch`, `last_received_at_epoch`, `quiet_deadline_epoch`, `max_deadline_epoch`, `flush_at_epoch`, `message_count`, `merged_text`, `flushed_at_epoch`, `route_stage`, `staff_case_id`, `generation`, `preempt_count`, `preempt_locked` | `idx_merge_active_reader` 与 `idx_merge_queued_reader` 部分唯一索引保证单读者同时至多一个未锁定活动批与一个排队批。 |
 | `batch_messages` | `id`, `batch_id`, `event_seq UNIQUE`, `received_at_epoch`, `text_content` | 记录构成批次的有序去重文本，按 `(received_at_epoch, event_seq)` 合并。 |
 | `feedback_records` | `feedback_id`, `account_id`, `reader_id`, `event_seq`, `content`, `status`, `staff_note` | 存储 `Feedback` 非紧急建议供 Dashboard 展示（不阻塞后续正常提问）。 |
 | `staff_cases` | `case_id`, `account_id`, `reader_id`, `source_batch_id`, `source_event_seq`, `case_kind (staff_todo\|emergency)`, `status (open\|closed)`, `summary`, `latest_message`, `closed_at_utc`, `resolution_note` | 馆员待办与紧急事件记录，`open` 的 `staff_todo` 参与 `Same Unresolved Staff Case?` 判定。 |
 | `staff_case_messages` | `item_id`, `case_id`, `batch_id`, `event_seq`, `sender_role`, `content` | 未结待办上的读者补充消息及系统/馆员处理时间线。 |
 | `outbound_replies` | `reply_id`, `account_id`, `reader_id`, `trigger_kind`, `trigger_ref_id`, `content`, `delivery_mode`, `status`, `errcode`, `errmsg`, `duration_ms` | 审计每一次真实发送或影子（shadow）记录，保留失败原因。 |
+| `clarification_states` / `triage_runs` | `clarify_id`, `status`, `expires_at_epoch` / `run_id`, `stage_path`, `decision_*` | Step 3 增加的单次澄清状态机与完整路由审计表（详见 [Step 3 文档](STEP3-TIER1-AND-TIER2-RAG.md)）。 |
 
 ---
 
@@ -64,14 +65,15 @@
    - **提交屏障防双发与防饿死**：唯有在 `commit_batch_generation` 原子核对 `status='processing' AND generation=expected` 通过后才闭合批次并发送/记待办；过期代次静默丢弃。达到重跑上限或超时上限时将当前批次锁定（`preempt_locked=1`）让其正常答复，后续新消息自动写入 `queued` 批次排队接力。
    - 重启恢复时自动续跑所有未闭合的 `processing` 及孤立 `queued` 批次。
 
-- **出站发信开关（默认安全影子模式）**：`SUPPORT_AUTO_REPLY_ENABLED` 默认 `false`（仅写入 `outbound_replies(status='shadow')`，不向读者发真实客服消息），待 Step 3 接通后再开启 `true` 通过自有服务器直连 `custom/send` 发信。
+- **出站发信与灰度开关**：代码中 `SUPPORT_AUTO_REPLY_ENABLED` 默认 `false`（仅写入 `outbound_replies(status='shadow')`）；Step 3 已将生产环境 `/etc/wechat-relay.env` 开启 `SUPPORT_AUTO_REPLY_ENABLED=true` 并配合 `SUPPORT_AUTO_REPLY_ALLOWLIST` 控制仅对白名单测试用户实发微信客服消息（[详见 Step 3 文档](STEP3-TIER1-AND-TIER2-RAG.md)）。
 
 ---
 
 ## 可观察与联调接口（均需 `RELAY_AUTH_TOKEN` Bearer 鉴权）
 
-- `POST /relay/wechat`：保持 Step 1 响应契约不变（`{ok, accepted, duplicate, seq}`），内部同步落盘 JSONL + SQLite，并触发 Filter 与异步合并调度。
-- `GET /relay/support/overview`：各分类计数、活跃 `open` 批次数、最近待办/反馈/发信统计（不返回 OpenID 与原始文本）。
-- `GET /relay/support/events`、`GET /relay/support/batches`、`GET /relay/support/feedbacks`、`GET /relay/support/cases`、`GET /relay/support/replies`：按 `limit` 查看结构化处理状态。
+- `POST /relay/wechat`：保持 Step 1 响应契约不变（`{ok, accepted, duplicate, seq}`），内部校对 `wx_headers` 后同步落盘 JSONL + SQLite，并触发 Filter 与异步合并/抢占调度。
+- `GET /relay/support/overview`：各分类计数、活跃 `open`/`processing`/`queued` 批次数、最近待办/反馈/澄清/分流/发信统计（不返回 OpenID 与原始文本）。
+- `GET /relay/support/events`、`GET /relay/support/batches`、`GET /relay/support/feedbacks`、`GET /relay/support/cases`、`GET /relay/support/replies`：按 `limit=1..200` 及可选 `category`/`status` 查看结构化处理状态。
+- `POST /relay/support/cases`：手动创建馆员待办（需 `reader_id` 与 `summary`）。
 - `POST /relay/support/flush-due`：手动触发到期批次冲刷（便于离线排障与验收）。
-- `POST /relay/support/cases/{case_id}/close`：手工结案待办并记录 `resolution_note`，用于验证后续消息不再追加到已结案件。
+- `POST /relay/support/cases/{case_id}/close`：手工结案待办并记录可选 `resolution_note`，使同一读者后续新消息不再追加到已结案件。

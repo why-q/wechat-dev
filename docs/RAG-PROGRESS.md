@@ -1,6 +1,14 @@
-# RAG PoC 进度
+# RAG PoC 进度（Phase 1 归档记录）
 
-## 当前状态
+> [!NOTE]
+> 本文档保留 **2026-11-24 ~ 11-25** 早期 PoC 与 Phase 1 云托管直连 RAG 的探索及基线记录。
+> 当前生产架构已演进为「**微信云托管极简 2 变量转发 -> 自建服务器 `wechat-relay.service`（Filter / Merge / Tier 1 `/v1/systemone` / Tier 2 仅 `0.` 语料 `index_v2`）**」，请查阅：
+> - 总览与运维：[README.md](../README.md)
+> - Step 1 转发与环境收敛：[CLOUD-FORWARD-TEST-PIPELINE.md](CLOUD-FORWARD-TEST-PIPELINE.md)
+> - Step 2 过滤与持久化：[STEP2-FILTER-AND-MERGE-PIPELINE.md](STEP2-FILTER-AND-MERGE-PIPELINE.md)
+> - Step 3 Tier 1/2 与测试白名单：[STEP3-TIER1-AND-TIER2-RAG.md](STEP3-TIER1-AND-TIER2-RAG.md)
+
+## 当前状态（2026-11-25 快照）
 
 公众号回调代码已接入 LlamaIndex `RagResponder`：文字消息在返回 `success` 后经远程 embedding/chat API 查询本地索引，再通过微信客服 API 发送带来源的回答；OpenID 不传给模型。若 RAG 初始化失败，服务仍启动以提供 health 和非文字回调，但文字回调返回 HTTP 503 且不确认；查询失败则发送通用回复，不记录 provider 异常。
 

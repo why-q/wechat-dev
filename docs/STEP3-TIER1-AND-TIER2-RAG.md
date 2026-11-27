@@ -19,22 +19,30 @@
 | 模块 / 配置 | 说明 |
 |---|---|
 | `support_backend/presets.py` | 解析 `1.*.md` frontmatter（含无 `PyYAML` 时的安全回退）、`normalize_alias_text`、别名碰撞检测。 |
-| `support_backend/decision_client.py` | `/v1/systemone` HTTP JSON 客户端，兼容 `choice`/`noul`/`score`、`2s` 超时控制及 URL 自动规范化。 |
+| `support_backend/decision_client.py` | `/v1/systemone` HTTP JSON 客户端，兼容 `choice`/`noul`/`score`、默认 `3.0s` 超时控制及 URL 自动规范化。 |
 | `support_backend/knowledge.py` | `0.` 语料建库与运行时检索回答 CLI（`python -m support_backend inspect-chunks \| build-index`）、NLTK 单链属主隔离缓存（兼容 systemd `DynamicUser=yes`）。 |
 | `support_backend/responder.py` | Tier 1a -> Tier 1b -> Tier 2 -> 澄清/Fallback 编排，与 Step 2 的 `commit_batch_generation` 提交屏障严格解耦：仅在提交成功后消费澄清状态、建待办并发信。 |
-| `GET /relay/support/triage-runs` | 查阅结构化路由与引用审计记录（需 Bearer 鉴权）。 |
-| `GET /relay/support/presets` | 查看已加载的 `1.` 固定答案与别名清单（需 Bearer 鉴权）。 |
+| `support_backend/schema.py` & `shared.py` | SQLite DDL（`SCHEMA_VERSION=3`）与跨模块复用的脱敏、环境变量和 UTF-8 边界工具。 |
+| `GET /relay/support/triage-runs` | 查阅结构化路由与引用审计记录（支持 `limit=1..200`，返回 `{count, runs}`，需 Bearer 鉴权）。 |
+| `GET /relay/support/presets` | 查看已加载的 `1.` 固定答案与别名清单（返回 `{count, presets}`，含 `preset_id`/`title`/`aliases`/`applicability`，需 Bearer 鉴权）。 |
 
 ---
 
-## 环境变量一览
+## 环境变量一览（统一收敛于 `/etc/wechat-relay.env`）
 
 - `SUPPORT_DECISION_BASE_URL` / `SUPPORT_DECISION_API_KEY` / `SUPPORT_DECISION_MODEL`（默认 `decision-model-preview`）/ `SUPPORT_DECISION_TIMEOUT_SECONDS`（按线上实测耗时校准为默认 `3.0`）
-- `SUPPORT_CORPUS_DIR`（默认 `rag-poc/corpus`）、`SUPPORT_INDEX_DIR`（默认 `rag-poc/index_v2`，仅 `0.` 索引）
+- `SUPPORT_CORPUS_DIR`（由 systemd 指定 `/srv/wechat-relay/rag-poc/corpus`）、`SUPPORT_INDEX_DIR`（由 systemd 指定 `/srv/wechat-relay/rag-poc/index_v2`，仅 `0.` 索引）
 - `SUPPORT_PRESET_MIN_CONFIDENCE`（默认 `0.65`）、`SUPPORT_LONG_ANSWER_CHARS`（默认 `220`）
-- `SUPPORT_AUTO_REPLY_ENABLED`（默认 `false`）与 `SUPPORT_AUTO_REPLY_ALLOWLIST`（可选逗号分隔 OpenID 列表；开启 `SUPPORT_AUTO_REPLY_ENABLED=true` 且配置白名单时仅白名单用户触发真实 `custom/send`，其余读者保留 `status='shadow'` 记录）
+- `SUPPORT_AUTO_REPLY_ENABLED`（代码默认 `false`，线上环境开启 `true`）与 `SUPPORT_AUTO_REPLY_ALLOWLIST`（可选逗号分隔 OpenID 列表；仅白名单用户触发真实 `custom/send`，其余读者保留 `status='shadow'` 记录）
 - `SUPPORT_TIER2_ENABLED`（默认 `true`）、`SUPPORT_TIER2_TOP_K`（默认 `4`）、`SUPPORT_TIER2_MIN_SCORE`（默认 `0.2`）
 - `RAG_NLTK_DATA_DIR`：systemd 下设 `/var/lib/private/wechat-relay/nltk_data`，确保 `nltk.pathsec` 在 `DynamicUser=yes` 下满足单硬链与属主一致。
+
+---
+
+## 已知语料缺口与待办（衔接第 4 步）
+
+- 线下 `0.` 语料目前共 `5` 份文档、`66` 个块（已在 `2026-11-26` 真机测试命中 `exact_alias`、`decision_preset`、`tier2_clarify -> tier2_short`、`Feedback`、`Emergency`、`staff_case_appended` 与白名单实发）。
+- 实测中「静音舱怎么预约？」因现有 `0.` 语料缺少空间/静音舱/座位预约说明而按设计触发 `tier2_fallback` 并建出 `case_id=4`；将在第 4 步前清理测试待办并补充对应 `0.` 公开资料后再重跑 `build-index`。
 
 ---
 

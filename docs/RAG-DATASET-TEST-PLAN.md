@@ -1,5 +1,8 @@
 # RAG dataset and testing plan
 
+> [!NOTE]
+> **Implementation status (2026-11-27):** Phase 2 prospective SQLite intake (`inbound_events` with 7-day `expires_at_epoch`, `staff_cases`, `feedback_records`, and Step 3 `triage_runs`) is live in [support_backend/schema.py](../support_backend/schema.py) and [relay_receiver.py](../relay_receiver.py). Evaluation-set export & Step 4 Dashboard review remain scheduled next after doc/code cleanup.
+
 The four-document RAG baseline is kept for reproducibility. The broader customer support pilot reuses this document's corpus manifest, evaluation split, redaction, and intake contracts. It adds `emergency` to `expected_action` and ordered `turns` for multi-message cases. Its release gates and channel modes are defined in the [customer support design](LIBRARY-SUPPORT-DESIGN.md). The thresholds below retain their original scope as diagnostic gates for the initial RAG baseline.
 
 ## Recommendation
