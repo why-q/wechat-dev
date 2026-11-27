@@ -33,6 +33,7 @@ class InboxProjectionTests(unittest.TestCase):
                 first = render_inbox(store)
                 self.assertEqual(first.count('class="case-state"'), 50)
                 self.assertIn("更早私信", first)
+                self.assertIn("&lt;reader&gt; &amp; private", first)
                 self.assertNotIn(private_id, first)
                 self.assertNotIn("o_private_&lt;unique&gt;&amp;", first)
                 older = render_inbox(store, before=seqs[2])
@@ -41,6 +42,41 @@ class InboxProjectionTests(unittest.TestCase):
                 self.assertIn("返回最新", older)
                 now[0] += 8 * 24 * 3600
                 self.assertIn("当前没有保留中的读者私信", render_inbox(store))
+            finally:
+                store.close()
+
+    def test_projects_mixed_message_kinds_without_exposing_gray_keyword(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = SupportStore(Path(temp) / "mixed.db", clock=lambda: 1_800_000_000.0)
+            try:
+                keyword = "PRIVATE_ENROLL_TOKEN_73"
+                samples = [
+                    ("text", "有人晕倒", "emergency"),
+                    ("image", "", "unsupported"),
+                    ("text", "https://example.invalid/path", "unsupported"),
+                    ("text", "建议增加自习室座位", "feedback"),
+                    ("text", keyword, "gray_enroll"),
+                    ("text", "<b>markup & text</b>", "question"),
+                ]
+                for index, (kind, text, expected) in enumerate(samples):
+                    payload = {
+                        "transport": "cloud", "msg_type": kind, "event": "",
+                        "msg_id": f"mixed-{index}", "from_user": f"reader-{index}",
+                        "to_user": "library", "content": text, "create_time": "1800000000",
+                    }
+                    decision = classify_message(msg_type=kind, content=text, gray_enroll_keyword=keyword)
+                    self.assertEqual(decision.category, expected)
+                    store.ingest_event(payload, decision, client_ip="")
+                rendered = render_inbox(store)
+                self.assertIn("紧急消息", rendered)
+                self.assertIn("未结案", rendered)
+                self.assertIn("图片消息", rendered)
+                self.assertIn("https://example.invalid/path", rendered)
+                self.assertIn("建议增加自习室座位", rendered)
+                self.assertIn("灰度入组消息", rendered)
+                self.assertNotIn(keyword, rendered)
+                self.assertIn("&lt;b&gt;markup &amp; text&lt;/b&gt;", rendered)
+                self.assertNotIn("<b>markup & text</b>", rendered)
             finally:
                 store.close()
 
