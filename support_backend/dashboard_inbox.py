@@ -27,7 +27,7 @@ def render_inbox(store: SupportStore, *, before: int | None = None) -> str:
     page = rows[:PAGE_SIZE]
     if not page:
         latest = '<nav aria-label="私信分页"><a href="/dashboard/librarian">返回最新</a></nav>' if before is not None else ""
-        return f'<section class="panel queue-panel"><h1>私信按未结案展示</h1><p>当前没有保留中的读者私信。</p>{latest}</section>'
+        return f'<section class="panel queue-panel"><h2>私信按未结案展示</h2><p>当前没有保留中的读者私信。</p>{latest}</section>'
 
     items: list[str] = []
     for row in page:
@@ -61,7 +61,7 @@ def render_inbox(store: SupportStore, *, before: int | None = None) -> str:
     if has_older:
         paging = f'<nav aria-label="私信分页"><a href="?before={int(page[-1]["seq"])}">更早私信</a> <a href="/dashboard/librarian">返回最新</a></nav>'
     return (
-        '<section class="panel queue-panel"><h1>私信按未结案展示</h1>'
+        '<section class="panel queue-panel"><h2>私信按未结案展示</h2>'
         '<p>所有保留中的读者私信均按未结案显示，仅供查看。</p>'
         f'<ul class="case-list">{"".join(items)}</ul>{paging}</section>'
     )
