@@ -1256,18 +1256,27 @@ summary:focus-visible {
 }
 
 .allowlist-table {
-  min-width: 720px;
+  min-width: 680px;
   table-layout: fixed;
 }
 
-.allowlist-table th:nth-child(1) { width: 14%; }
-.allowlist-table th:nth-child(2) { width: 31%; }
-.allowlist-table th:nth-child(3) { width: 13%; }
-.allowlist-table th:nth-child(4) { width: 22%; }
-.allowlist-table th:nth-child(5) { width: 20%; }
+.allowlist-table th:nth-child(1) { width: 38px; text-align: center; }
+.allowlist-table th:nth-child(2) { width: 14%; }
+.allowlist-table th:nth-child(3) { width: 34%; }
+.allowlist-table th:nth-child(4) { width: 11%; }
+.allowlist-table th:nth-child(5) { width: 22%; }
+.allowlist-table th:nth-child(6) { width: 13%; text-align: right; }
 
 .allowlist-table td {
-  vertical-align: top;
+  vertical-align: middle;
+}
+
+.allowlist-table td:nth-child(1) {
+  text-align: center;
+}
+
+.allowlist-table td:nth-child(6) {
+  text-align: right;
 }
 
 .allowlist-table code {
@@ -1276,11 +1285,169 @@ summary:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.allowlist-remove {
+.allowlist-check,
+#allowlist-select-all {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  vertical-align: middle;
+  accent-color: var(--green);
+  cursor: pointer;
+}
+
+.allowlist-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 5px 8px;
+  justify-content: space-between;
+  gap: 8px 12px;
+  margin: 0 0 8px;
+}
+
+.allowlist-toolbar .subsection-title {
+  margin: 0;
+}
+
+.allowlist-batch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.trash-confirm {
+  position: relative;
+  display: inline-block;
+  text-align: right;
+}
+
+.trash-confirm > summary {
+  list-style: none;
+}
+
+.trash-confirm > summary::-webkit-details-marker {
+  display: none;
+}
+
+.icon-btn {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-small);
+  background: transparent;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.icon-btn--danger {
+  color: var(--rust);
+}
+
+@media (hover: hover) {
+  .icon-btn--danger:hover {
+    background: var(--rust-soft);
+    border-color: oklch(0.83 0.07 48);
+  }
+}
+
+.trash-confirm[open] > .icon-btn--danger {
+  background: var(--rust-soft);
+  border-color: oklch(0.83 0.07 48);
+}
+
+.trash-confirm-popover {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: var(--rust-soft);
+  border: 1px solid oklch(0.83 0.07 48);
+  border-radius: var(--radius-small);
+  white-space: nowrap;
+}
+
+.trash-confirm-label {
+  color: var(--rust);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.button--danger {
+  color: var(--surface);
+  background: var(--rust);
+  border-color: var(--rust);
+}
+
+.button--danger-quiet {
+  color: var(--rust);
+  background: var(--surface);
+  border-color: oklch(0.83 0.07 48);
+}
+
+.button--xs {
+  min-height: 26px;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+@media (hover: hover) {
+  .button--danger:hover {
+    color: var(--surface);
+    background: oklch(0.41 0.125 36);
+    border-color: oklch(0.41 0.125 36);
+  }
+
+  .button--danger-quiet:hover {
+    color: var(--rust);
+    background: var(--rust-soft);
+    border-color: var(--rust);
+  }
+}
+
+.batch-confirm {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.batch-confirm > summary {
+  list-style: none;
+  min-height: 30px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+}
+
+.batch-confirm > summary::-webkit-details-marker {
+  display: none;
+}
+
+.manual-remove-details {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--rule);
+}
+
+.manual-remove-details > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  font-size: 11.5px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.manual-remove-details .allowlist-remove-known {
+  margin-top: 8px;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .confirm-label {

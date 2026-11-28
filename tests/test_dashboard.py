@@ -161,6 +161,11 @@ class DashboardRouteTests(unittest.TestCase):
         )
         self.assertEqual(denied.status_code, 403)
 
+        self.store.enroll_allowlist(
+            account_id="official-account",
+            reader_id="openid-demo-1",
+            source="admin",
+        )
         admin = self.client.request(
             "GET",
             "/dashboard/admin",
@@ -239,6 +244,34 @@ class DashboardRouteTests(unittest.TestCase):
         self.assertFalse(self.store.is_allowlisted("account-a", "openid-a"))
         self.assertTrue(self.store.is_allowlisted("account-b", "openid-a"))
 
+        self.store.enroll_allowlist(account_id="account-b", reader_id="openid-b", source="admin")
+        self.store.enroll_allowlist(account_id="account-c", reader_id="openid-c", source="admin")
+        batch_body = urlencode(
+            [
+                ("confirm", "yes"),
+                ("item", "account-b\topenid-a"),
+                ("item", "account-b\topenid-b"),
+            ]
+        ).encode()
+        batch_denied = self.client.request(
+            "POST",
+            "/dashboard/admin/allowlist/remove-batch",
+            body=batch_body,
+            headers={**base_headers, **self._request_headers("librarian", "librarian-test-password")},
+        )
+        self.assertEqual(batch_denied.status_code, 403)
+        batch_ok = self.client.request(
+            "POST",
+            "/dashboard/admin/allowlist/remove-batch",
+            body=batch_body,
+            headers={**base_headers, **self._request_headers("admin", "admin-test-password")},
+        )
+        self.assertEqual(batch_ok.status_code, 303)
+        self.assertEqual(batch_ok.headers["location"], "/dashboard/admin?result=batch-removed")
+        self.assertFalse(self.store.is_allowlisted("account-b", "openid-a"))
+        self.assertFalse(self.store.is_allowlisted("account-b", "openid-b"))
+        self.assertTrue(self.store.is_allowlisted("account-c", "openid-c"))
+
     def test_missing_credentials_fail_closed(self):
         app = FastAPI()
         app.include_router(create_dashboard_router(public_origin="https://dashboard.example"))
@@ -274,6 +307,11 @@ class DashboardRouteTests(unittest.TestCase):
             reply_preview="短答",
         )
 
+        self.store.enroll_allowlist(
+            account_id="official-account",
+            reader_id="openid-demo-1",
+            source="admin",
+        )
         admin = self.client.request(
             "GET",
             "/dashboard/admin",
@@ -284,7 +322,16 @@ class DashboardRouteTests(unittest.TestCase):
         self.assertIn("近 7 日入站趋势", admin.text)
         self.assertIn("问答分流路径", admin.text)
         self.assertIn("<svg", admin.text)
-        self.assertIn("script-src 'none'", admin.headers["content-security-policy"])
+        self.assertIn("script-src 'sha256-", admin.headers["content-security-policy"])
+        self.assertIn("allowlist-select-all", admin.text)
+        self.assertIn("trash-confirm", admin.text)
+
+        lib_csp = self.client.request(
+            "GET",
+            "/dashboard/librarian",
+            headers=self._request_headers("librarian", "librarian-test-password"),
+        )
+        self.assertIn("script-src 'none'", lib_csp.headers["content-security-policy"])
 
         css = self.client.request("GET", "/dashboard/static/dashboard.css")
         self.assertEqual(css.status_code, 200)

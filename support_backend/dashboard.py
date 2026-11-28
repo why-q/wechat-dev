@@ -7,6 +7,7 @@ import binascii
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import lru_cache
+import hashlib
 import hmac
 import html
 import os
@@ -16,7 +17,7 @@ from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from .dashboard_charts import (
     render_admin_overview,
@@ -31,6 +32,28 @@ from .dashboard_librarian import render_librarian_workbench
 from .db import SupportStore
 
 
+_ADMIN_ALLOWLIST_SCRIPT = (
+    "(function(){"
+    "var a=document.getElementById('allowlist-select-all');"
+    "var b=[].slice.call(document.querySelectorAll('.allowlist-check'));"
+    "var c=document.getElementById('selected-count');"
+    "var d=document.getElementById('batch-remove-details');"
+    "if(!a||!b.length)return;"
+    "function s(){"
+    "var n=b.filter(function(x){return x.checked;}).length;"
+    "a.checked=n===b.length;"
+    "a.indeterminate=n>0&&n<b.length;"
+    "if(c)c.textContent=n?' ('+n+')':'';"
+    "if(d&&!n)d.removeAttribute('open');"
+    "}"
+    "a.addEventListener('change',function(){b.forEach(function(x){x.checked=a.checked;});s();});"
+    "b.forEach(function(x){x.addEventListener('change',s);});"
+    "s();"
+    "})();"
+)
+_ADMIN_SCRIPT_SHA256 = base64.b64encode(
+    hashlib.sha256(_ADMIN_ALLOWLIST_SCRIPT.encode("utf-8")).digest()
+).decode("ascii")
 _SECURITY_HEADERS = {
     "Cache-Control": "no-store",
     "Content-Security-Policy": (
@@ -43,6 +66,23 @@ _SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Vary": "Authorization",
 }
+_ADMIN_SECURITY_HEADERS = {
+    **_SECURITY_HEADERS,
+    "Content-Security-Policy": (
+        "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        f"img-src 'self' data:; script-src 'sha256-{_ADMIN_SCRIPT_SHA256}'; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    ),
+}
+_TRASH_ICON_SVG = (
+    '<svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" '
+    'stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+    '<path d="M2.5 4h11"/>'
+    '<path d="M6 4V2.5h4V4"/>'
+    '<path d="M4 4l.7 9.2a1 1 0 0 0 1 .8h4.6a1 1 0 0 0 1-.8L12 4"/>'
+    '<path d="M6.6 7v4.2M9.4 7v4.2"/>'
+    "</svg>"
+)
 _FAVICON_DATA_URI = (
     "data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E"
     "%3Crect width=%2732%27 height=%2732%27 rx=%275%27 fill=%27%231e4334%27/%3E"
@@ -236,8 +276,8 @@ def _store_from_request(request: Request) -> SupportStore | None:
     return store if isinstance(store, SupportStore) else None
 
 
-def _response(body: str, *, status_code: int = 200) -> HTMLResponse:
-    return HTMLResponse(body, status_code=status_code, headers=_SECURITY_HEADERS)
+def _response(body: str, *, status_code: int = 200, headers: dict[str, str] | None = None) -> HTMLResponse:
+    return HTMLResponse(body, status_code=status_code, headers=headers or _SECURITY_HEADERS)
 
 
 def _escape(value: object) -> str:
@@ -265,7 +305,7 @@ def _status_banner(text: str) -> str:
     return f'<p class="status-note" role="status">{_escape(text)}</p>'
 
 
-def _page_frame(*, role: str, active: str, main: str, footer: str) -> str:
+def _page_frame(*, role: str, active: str, main: str, footer: str, script: str = "") -> str:
     nav_items = [("librarian", "/dashboard/librarian", "普通馆员")]
     if role == "admin":
         nav_items.insert(0, ("admin", "/dashboard/admin", "管理员"))
@@ -276,6 +316,7 @@ def _page_frame(*, role: str, active: str, main: str, footer: str) -> str:
     navigation = "".join(links)
     home_href = "/dashboard/admin" if role == "admin" and active == "admin" else "/dashboard/librarian"
     style_tag = _inline_css_tag()
+    script_tag = f"<script>{script}</script>" if script else ""
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -301,6 +342,7 @@ def _page_frame(*, role: str, active: str, main: str, footer: str) -> str:
     <main id="main-content">{main}</main>
     <footer class="footer"><span>{_escape(footer)}</span><span>仅授权馆员访问 · 页面不缓存</span></footer>
   </div>
+  {script_tag}
 </body>
 </html>"""
 
@@ -408,31 +450,57 @@ def _dynamic_allowlist_rows(entries: list[dict[str, object]]) -> str:
         reader_id = str(entry.get("reader_id", ""))
         source = str(entry.get("source", ""))
         updated = str(entry.get("updated_at_utc", ""))
+        item_value = f"{account_id}\t{reader_id}"
         rows.append(
             "<tr>"
+            '<td><input class="allowlist-check" type="checkbox" form="allowlist-batch-form" '
+            f'name="item" value="{_escape(item_value)}" aria-label="选择 {_escape(reader_id)}"></td>'
             f'<td><code>{_escape(account_id)}</code></td>'
             f'<td class="allowlist-reader"><code>{_escape(reader_id)}</code></td>'
             f"<td>{_escape(source)}</td>"
             f"<td>{_escape(updated)}</td>"
-            '<td><form class="allowlist-remove" method="post" action="/dashboard/admin/allowlist/remove">'
+            '<td><details class="trash-confirm">'
+            f'<summary class="icon-btn icon-btn--danger" aria-label="移出 {_escape(reader_id)}" title="移出">'
+            f"{_TRASH_ICON_SVG}</summary>"
+            '<form class="trash-confirm-popover" method="post" action="/dashboard/admin/allowlist/remove">'
             f'<input type="hidden" name="account_id" value="{_escape(account_id)}">'
             f'<input type="hidden" name="reader_id" value="{_escape(reader_id)}">'
-            '<label class="confirm-label"><input type="checkbox" name="confirm" value="yes" required> 确认</label>'
-            '<button class="button button--quiet" type="submit">移出</button>'
-            "</form></td></tr>"
+            '<input type="hidden" name="confirm" value="yes">'
+            '<span class="trash-confirm-label">确认移出？</span>'
+            '<button class="button button--danger button--xs" type="submit">确认</button>'
+            "</form></details></td></tr>"
         )
-    return "".join(rows) or '<tr><td colspan="5">动态名单暂无条目。</td></tr>'
+    return "".join(rows) or '<tr><td colspan="6">动态名单暂无条目。</td></tr>'
 
 
 def _admin_allowlist_panel(store: SupportStore, pipeline: object, metrics: dict[str, object]) -> str:
     entries = store.list_allowlist(limit=200)
     dynamic_total = int(metrics.get("dynamic_allowlist_count", 0))
     static_total = len(getattr(pipeline, "auto_reply_allowlist", ()))
+    batch_controls = ""
+    if entries:
+        batch_controls = (
+            '<div class="allowlist-batch-actions">'
+            '<form id="allowlist-batch-form" method="post" action="/dashboard/admin/allowlist/remove-batch">'
+            '<input type="hidden" name="confirm" value="yes">'
+            "</form>"
+            '<details class="batch-confirm" id="batch-remove-details">'
+            '<summary class="button button--danger-quiet">删除已选<span id="selected-count"></span></summary>'
+            '<span class="trash-confirm-popover">'
+            '<span class="trash-confirm-label">确认删除选中条目？</span>'
+            '<button class="button button--danger button--xs" type="submit" form="allowlist-batch-form">确认删除</button>'
+            "</span>"
+            "</details>"
+            "</div>"
+        )
     table = (
         '<div class="table-wrap"><table class="data-table allowlist-table">'
         '<caption class="sr-only">动态自动回复允许名单</caption>'
-        '<thead><tr><th scope="col">账户 ID</th><th scope="col">读者 OpenID</th>'
-        '<th scope="col">来源</th><th scope="col">最近更新</th><th scope="col">操作</th></tr></thead>'
+        '<thead><tr>'
+        '<th scope="col"><input type="checkbox" id="allowlist-select-all" aria-label="全选动态条目"></th>'
+        '<th scope="col">账户 ID</th><th scope="col">读者 OpenID</th>'
+        '<th scope="col">来源</th><th scope="col">最近更新</th><th scope="col">操作</th>'
+        "</tr></thead>"
         f"<tbody>{_dynamic_allowlist_rows(entries)}</tbody></table></div>"
     )
     return (
@@ -447,15 +515,20 @@ def _admin_allowlist_panel(store: SupportStore, pipeline: object, metrics: dict[
         '<label>读者 OpenID<input class="form-control" name="reader_id" maxlength="255" required autocomplete="off"></label>'
         '<button class="button" type="submit">加入动态名单</button>'
         "</form>"
-        f'<h3 class="subsection-title">最近更新的动态条目 <span>展示最多 200 条，旧条目可按账户 ID 与 OpenID 指定移除</span></h3>{table}'
+        '<div class="allowlist-toolbar">'
+        '<h3 class="subsection-title">最近更新的动态条目 <span>展示最多 200 条 · 勾选可批量删除</span></h3>'
+        f"{batch_controls}"
+        f"</div>{table}"
+        '<details class="manual-remove-details">'
+        "<summary>按账户 ID 与 OpenID 手动移除列表外条目</summary>"
         '<form class="allowlist-remove-known" method="post" action="/dashboard/admin/allowlist/remove">'
-        '<h3 class="subsection-title">移除列表外条目</h3>'
         '<label>账户 ID<input class="form-control" name="account_id" value="default" maxlength="255" required autocomplete="off"></label>'
         '<label>读者 OpenID<input class="form-control" name="reader_id" maxlength="255" required autocomplete="off"></label>'
         '<label class="confirm-label"><input type="checkbox" name="confirm" value="yes" required> 确认只移除该账户下该读者</label>'
-        '<button class="button button--quiet" type="submit">移除指定条目</button>'
+        '<button class="button button--danger-quiet" type="submit">移除指定条目</button>'
         "</form>"
-        '<p class="panel-footnote">不会清空名单，也不会修改静态环境变量配置。</p>'
+        "</details>"
+        '<p class="panel-footnote">仅操作动态数据库名单，不修改静态环境变量配置。</p>'
         "</section></div>"
     )
 
@@ -464,8 +537,9 @@ _ADMIN_RESULT_NOTICES = {
     "added": "已加入动态名单。",
     "existing": "条目已存在，已更新来源。",
     "removed": "已移出动态名单。",
+    "batch-removed": "已批量移出选中的动态名单条目。",
     "not-found": "没有找到该动态条目。",
-    "invalid": "操作未执行，请检查输入。",
+    "invalid": "操作未执行，请先勾选条目或检查输入。",
 }
 _LIBRARIAN_RESULT_NOTICES = {
     "closed": "工单已标记结案。",
@@ -491,7 +565,13 @@ def _admin_dashboard(pipeline: object, store: SupportStore, *, result: str = "")
         + render_admin_overview(analytics, reply_mode_text=_reply_mode(pipeline))
         + _admin_allowlist_panel(store, pipeline, metrics)
     )
-    return _page_frame(role="admin", active="admin", main=main, footer="管理员工作视图")
+    return _page_frame(
+        role="admin",
+        active="admin",
+        main=main,
+        footer="管理员工作视图",
+        script=_ADMIN_ALLOWLIST_SCRIPT,
+    )
 
 
 def _librarian_donut_adapter(
@@ -607,6 +687,31 @@ async def _read_form(request: Request) -> dict[str, str] | None:
         if key in values:
             return None
         values[key] = value
+    return values
+
+
+async def _read_form_multidict(
+    request: Request,
+    *,
+    max_bytes: int = 65536,
+    max_fields: int = 256,
+) -> dict[str, list[str]] | None:
+    content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type != "application/x-www-form-urlencoded":
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > max_bytes:
+            return None
+        body.extend(chunk)
+    try:
+        raw = body.decode("utf-8")
+        pairs = parse_qsl(raw, keep_blank_values=True, strict_parsing=True, max_num_fields=max_fields)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    values: dict[str, list[str]] = {}
+    for key, value in pairs:
+        values.setdefault(key, []).append(value)
     return values
 
 
@@ -756,7 +861,8 @@ def create_dashboard_router(
                 pipeline,
                 store,
                 result=request.query_params.get("result", ""),
-            )
+            ),
+            headers=_ADMIN_SECURITY_HEADERS,
         )
 
     async def mutate_allowlist(request: Request, *, operation: str) -> Response:
@@ -795,6 +901,41 @@ def create_dashboard_router(
     @router.post("/dashboard/admin/allowlist/remove")
     async def remove_allowlist(request: Request) -> Response:
         return await mutate_allowlist(request, operation="remove")
+
+    @router.post("/dashboard/admin/allowlist/remove-batch")
+    async def remove_allowlist_batch(request: Request) -> Response:
+        _, error = _authenticate(request, settings, allowed_roles=frozenset({"admin"}))
+        if error is not None:
+            return error
+        if not _csrf_valid(request, settings):
+            return _plain_error(403, "same-origin request required")
+        form = await _read_form_multidict(request)
+        if form is None:
+            return _plain_error(400, "invalid form")
+        store = _store_from_request(request)
+        if store is None:
+            return _plain_error(503, "dashboard data unavailable")
+
+        confirms = form.get("confirm", [])
+        if len(confirms) != 1 or confirms[0] != "yes":
+            return _redirect_admin("invalid")
+        raw_items = form.get("item", [])
+        if not raw_items or len(raw_items) > 200:
+            return _redirect_admin("invalid")
+
+        targets: list[tuple[str, str]] = []
+        for raw_item in raw_items:
+            account_id, sep, reader_id = raw_item.partition("\t")
+            account_id = account_id.strip()
+            reader_id = reader_id.strip()
+            if not sep or not _valid_identifier(account_id) or not _valid_identifier(reader_id):
+                return _redirect_admin("invalid")
+            targets.append((account_id, reader_id))
+
+        removed_total = 0
+        for account_id, reader_id in targets:
+            removed_total += store.remove_allowlist(reader_id, account_id=account_id)
+        return _redirect_admin("batch-removed" if removed_total > 0 else "not-found")
 
     return router
 
