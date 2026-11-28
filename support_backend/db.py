@@ -1354,6 +1354,15 @@ class SupportStore:
                         "UPDATE merge_batches SET staff_case_id = ? WHERE batch_id = ?",
                         (case_id, source_batch_id),
                     )
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
+                        (case_id, source_batch_id),
+                    )
+                if source_event_seq is not None:
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
+                        (case_id, source_event_seq),
+                    )
             row = self._conn.execute("SELECT * FROM staff_cases WHERE case_id = ?", (case_id,)).fetchone()
             assert row is not None
             return self._row_to_case(row)
@@ -1543,7 +1552,7 @@ class SupportStore:
                         "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
                         (case_id, source_batch_id),
                     )
-                elif source_event_seq is not None:
+                if source_event_seq is not None:
                     self._conn.execute(
                         "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
                         (case_id, source_event_seq),
@@ -1655,6 +1664,10 @@ class SupportStore:
                 if source_batch_id is not None:
                     self._conn.execute(
                         "UPDATE merge_batches SET staff_case_id = ? WHERE batch_id = ?",
+                        (case_id, source_batch_id),
+                    )
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
                         (case_id, source_batch_id),
                     )
                 if source_event_seq is not None:

@@ -686,6 +686,11 @@ class Step5StoreTests(unittest.TestCase):
         self.assertTrue(is_reader_closing_ack("收到，明白了"))
         self.assertFalse(is_reader_closing_ack("谢谢，那周末也能预约吗？"))
         self.assertFalse(is_reader_closing_ack("静音舱怎么预约"))
+        # Compound gratitude phrases must be classified as invalid (never trigger AI fallback or bogus staff cases)
+        self.assertEqual(classify_message("text", "好的，谢谢").category, "invalid")
+        self.assertEqual(classify_message("text", "好的谢谢").category, "invalid")
+        self.assertEqual(classify_message("text", "收到，谢谢老师！").category, "invalid")
+        self.assertEqual(classify_message("text", "谢谢，那周末也能预约吗？").category, "question")
 
         now = [1_800_000_000.0]
         store = SupportStore(self.db_path, clock=lambda: now[0], merge_enabled=True)

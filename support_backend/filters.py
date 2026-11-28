@@ -227,7 +227,7 @@ def classify_message(
     if enroll_target and _normalize_keyword(without_emoji) == enroll_target:
         return FilterDecision(category="gray_enroll", reason="gray_allowlist_keyword", normalized_text=trimmed_text)
 
-    if core_token in _INVALID_EXACT_TOKENS:
+    if core_token in _INVALID_EXACT_TOKENS or is_reader_closing_ack(without_emoji):
         return FilterDecision(category="invalid", reason="noise_or_greeting", normalized_text=trimmed_text)
 
     if _GENERAL_EMERGENCY_RE.search(normalized_text):

@@ -1425,9 +1425,18 @@ def create_dashboard_router(
         if not delivery.get("ok"):
             return _redirect_librarian("send-failed", view=view, show_closed=show_closed)
 
-        if target.get("staff_case_id"):
+        linked_case_id: int | None = (
+            int(target["staff_case_id"]) if target.get("staff_case_id") else None
+        )
+        if linked_case_id is None:
+            latest_active = store.get_latest_active_staff_case(
+                target["account_id"], target["reader_id"]
+            )
+            if latest_active is not None and latest_active.get("status") == "open":
+                linked_case_id = int(latest_active["case_id"])
+        if linked_case_id is not None:
             store.mark_staff_case_replied(
-                int(target["staff_case_id"]),
+                linked_case_id,
                 reply_text,
                 operator_username=principal.username,
             )
@@ -1441,7 +1450,7 @@ def create_dashboard_router(
             question=question,
             staff_reply=reply_text,
             created_by=principal.username,
-            source_case_id=int(target["staff_case_id"]) if target.get("staff_case_id") else None,
+            source_case_id=linked_case_id,
             source_event_seq=event_seq,
             llm_fn=preset_generator_llm_fn,
         )
