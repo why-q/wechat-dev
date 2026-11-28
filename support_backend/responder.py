@@ -24,6 +24,10 @@ FALLBACK_TEMPLATE_REPLY = (
     "• 东海岸校区服务台：0754-8650 2999"
 )
 
+REOPENED_CASE_FOLLOWUP_REPLY = (
+    "已收到您的补充追问，已自动关联至原咨询记录并重新提交馆员跟进，请稍候回复。"
+)
+
 DEFAULT_CLARIFY_QUESTION = (
     "为了更准确地解答您的问题，方便补充一下具体情况吗（例如涉及哪个校区、具体业务名称或系统报错提示）？"
 )
@@ -239,6 +243,26 @@ class SupportResponder:
                     decision_duration_ms=decision_duration_ms,
                     create_staff_todo=True,
                 )
+            if reader_id:
+                recent_match = await asyncio.to_thread(
+                    self.store.find_recent_closed_matching_case,
+                    account_id=account_id,
+                    reader_id=reader_id,
+                    merged_text=merged_text,
+                    reopen_window_seconds=1800.0,
+                )
+                if recent_match is not None:
+                    return self._fallback_plan(
+                        stage_path="reopened_closed_case_followup",
+                        trigger_kind="staff_case_reopened",
+                        clarified_already=False,
+                        combined_question=combined_question,
+                        decision_route=decision_route,
+                        decision_preset_id=decision_preset_id,
+                        decision_confidence=decision_confidence,
+                        decision_duration_ms=decision_duration_ms,
+                        create_staff_todo=True,
+                    )
             clarify_q = await self._generate_clarify_question(combined_question)
             return TriagePlan(
                 stage_path="decision_clarify",
@@ -485,19 +509,45 @@ class SupportResponder:
             )
 
         created_case_id: int | None = outcome.staff_case_id
+        reopened_existing = False
         if plan.create_staff_todo and reader_id:
-            # Always create staff to-do BEFORE outbound send so delivery failure never loses follow-up.
-            case = await asyncio.to_thread(
-                self.store.create_staff_case,
+            source_event_seq = outcome.event_seqs[-1] if outcome.event_seqs else None
+            # Prefer reopening a recently closed matching case to preserve continuous conversation context.
+            reopened = await asyncio.to_thread(
+                self.store.reopen_recent_closed_staff_case_if_matching,
                 account_id=account_id,
                 reader_id=reader_id,
-                summary=plan.staff_summary or plan.combined_question[:120],
-                latest_message=plan.combined_question,
+                merged_text=plan.combined_question,
                 source_batch_id=batch_id,
-                source_event_seq=outcome.event_seqs[-1] if outcome.event_seqs else None,
-                case_kind="staff_todo",
+                source_event_seq=source_event_seq,
             )
-            created_case_id = case.case_id
+            if reopened is not None:
+                created_case_id = reopened.case_id
+                reopened_existing = True
+            else:
+                # Always create staff to-do BEFORE outbound send so delivery failure never loses follow-up.
+                case = await asyncio.to_thread(
+                    self.store.create_staff_case,
+                    account_id=account_id,
+                    reader_id=reader_id,
+                    summary=plan.staff_summary or plan.combined_question[:120],
+                    latest_message=plan.combined_question,
+                    source_batch_id=batch_id,
+                    source_event_seq=source_event_seq,
+                    case_kind="staff_todo",
+                )
+                created_case_id = case.case_id
+
+        reply_to_send = (
+            REOPENED_CASE_FOLLOWUP_REPLY
+            if reopened_existing and plan.reply_text == FALLBACK_TEMPLATE_REPLY
+            else plan.reply_text
+        )
+        stage_to_record = (
+            "reopened_closed_case_followup"
+            if reopened_existing and plan.stage_path != "reopened_closed_case_followup"
+            else plan.stage_path
+        )
 
         await asyncio.to_thread(
             self.store.record_triage_run,
@@ -506,7 +556,7 @@ class SupportResponder:
             reader_id=reader_id,
             generation=outcome.batch.generation,
             clarified_already=plan.clarified_already,
-            stage_path=plan.stage_path,
+            stage_path=stage_to_record,
             decision_route=plan.decision_route,
             decision_preset_id=plan.decision_preset_id,
             decision_confidence=plan.decision_confidence,
@@ -514,15 +564,15 @@ class SupportResponder:
             preset_id=plan.preset_id,
             source_url=plan.source_url,
             section_title=plan.section_title,
-            reply_preview=plan.reply_text,
+            reply_preview=reply_to_send,
             staff_case_id=created_case_id,
         )
 
-        if plan.reply_text and reader_id:
+        if reply_to_send and reader_id:
             await deliver_reply_fn(
                 account_id=account_id,
                 reader_id=reader_id,
-                trigger_kind=plan.trigger_kind,
+                trigger_kind="staff_case_reopened" if reopened_existing else plan.trigger_kind,
                 trigger_ref_id=created_case_id if created_case_id is not None else batch_id,
-                content=plan.reply_text,
+                content=reply_to_send,
             )

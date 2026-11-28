@@ -127,6 +127,10 @@ _FOLLOW_UP_MARKERS = (
     "截图",
     "还是那样",
     "现在还是",
+    "那这个",
+    "那请问",
+    "请问一下",
+    "另外",
 )
 _DISTINCT_NEW_TOPIC_RE = re.compile(
     r"(?:几点(?:开馆|关门|闭馆|开门)|开馆时间|闭馆时间|饮水机在哪里|WiFi|校园网|怎么借书|图书怎么预约|怎么荐购|推荐购买)"
@@ -244,7 +248,15 @@ def default_same_case_matcher(
         if marker in normalized:
             return True, "follow_up_marker"
 
-    case_context = f"{open_case.get('summary', '')} {open_case.get('latest_message', '')}"
+    case_context = " ".join(
+        part
+        for part in (
+            str(open_case.get("summary") or ""),
+            str(open_case.get("latest_message") or ""),
+            str(open_case.get("recent_messages_text") or ""),
+        )
+        if part
+    )
     msg_grams = _extract_cjk_bigrams(normalized)
     case_grams = _extract_cjk_bigrams(case_context)
     overlap = len(msg_grams & case_grams)

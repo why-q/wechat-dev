@@ -620,6 +620,64 @@ class Step5StoreTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_reopen_recent_closed_staff_case_preserves_continuity_without_hijacking_new_topics(self):
+        now = [1_800_000_000.0]
+        store = SupportStore(self.db_path, clock=lambda: now[0])
+        try:
+            case = store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_reader_cont",
+                summary="静音舱怎么预约",
+                latest_message="静音舱怎么预约？",
+            )
+            store.append_staff_case_reply(
+                case.case_id,
+                "静音舱可以通过图书馆微信小程序提前一天预约，每次最多2小时。",
+                operator_username="test_lib",
+            )
+            store.close_staff_case(case.case_id, resolution_note="已在工作台回复", closed_by="test_lib")
+            self.assertEqual(len(store.list_staff_cases(status="open")), 0)
+
+            # Distinct new topic must NOT reopen the closed silent-pod case.
+            now[0] += 120.0
+            unrelated = store.reopen_recent_closed_staff_case_if_matching(
+                account_id="gh_lib",
+                reader_id="o_reader_cont",
+                merged_text="请问图书馆几点关门？",
+            )
+            self.assertIsNone(unrelated)
+            self.assertEqual(len(store.list_staff_cases(status="open")), 0)
+
+            # Follow-up referencing term from the librarian's reply ("小程序") reopens the SAME case!
+            reopened = store.reopen_recent_closed_staff_case_if_matching(
+                account_id="gh_lib",
+                reader_id="o_reader_cont",
+                merged_text="那个微信小程序叫什么名字呀？",
+            )
+            self.assertIsNotNone(reopened)
+            assert reopened is not None
+            self.assertEqual(reopened.case_id, case.case_id)
+            self.assertEqual(reopened.status, "open")
+            self.assertIsNone(reopened.closed_at_utc)
+
+            open_cases = store.list_staff_cases(status="open")
+            self.assertEqual(len(open_cases), 1)
+            self.assertEqual(open_cases[0]["case_id"], case.case_id)
+            self.assertGreaterEqual(len(open_cases[0]["messages"]), 3)
+            self.assertEqual(open_cases[0]["messages"][-1]["content"], "那个微信小程序叫什么名字呀？")
+
+            # After 2h window expires, closed case is no longer reopened.
+            store.close_staff_case(case.case_id, resolution_note="已告知小程序名称", closed_by="test_lib")
+            now[0] += 3 * 3600.0
+            too_late = store.reopen_recent_closed_staff_case_if_matching(
+                account_id="gh_lib",
+                reader_id="o_reader_cont",
+                merged_text="那个微信小程序还是找不到",
+            )
+            self.assertIsNone(too_late)
+        finally:
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()
