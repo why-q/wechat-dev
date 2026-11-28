@@ -615,6 +615,60 @@ class ResponderHotReloadTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_evaluate_and_generate_preset_proposal_skips_short_and_non_reusable_replies(self):
+        from support_backend.preset_workflow import evaluate_and_generate_preset_proposal
+
+        catalog = PresetCatalog(())
+        # Very short reply skips LLM entirely
+        called = [0]
+
+        def counting_llm(_s: str, _u: str) -> dict[str, object]:
+            called[0] += 1
+            return {"should_create_draft": True, "title": "不应触发"}
+
+        self.assertIsNone(
+            evaluate_and_generate_preset_proposal(
+                question="帮我看看",
+                staff_reply="好的已处理",
+                catalog=catalog,
+                llm_fn=counting_llm,
+            )
+        )
+        self.assertEqual(called[0], 0)
+
+        # LLM returning should_create_draft=False skips draft creation
+        skipped = evaluate_and_generate_preset_proposal(
+            question="我的学号借书权限异常",
+            staff_reply="已核对您的个人借阅账户，现已为您单独恢复借阅权限。",
+            catalog=catalog,
+            llm_fn=lambda _s, _u: {
+                "should_create_draft": False,
+                "skip_reason": "纯个人账户特例处理，无通用公共规则",
+            },
+        )
+        self.assertIsNone(skipped)
+
+        # LLM returning should_create_draft=True produces a normalized proposal
+        created = evaluate_and_generate_preset_proposal(
+            question="静音舱怎么预约",
+            staff_reply="静音舱可以通过图书馆预约小程序提前一天预约，每次最多使用两小时。",
+            catalog=catalog,
+            llm_fn=lambda _s, _u: {
+                "should_create_draft": True,
+                "mode": "create",
+                "preset_id": "preset_silent_pod",
+                "title": "静音舱预约",
+                "aliases": ["静音舱", "静音舱预约"],
+                "applicability": "适用于读者咨询图书馆静音舱预约方式与时长。",
+                "body": "静音舱可通过图书馆预约小程序提前 1 天预约，每次最多使用 2 小时。",
+                "note": "通用空间预约规则",
+            },
+        )
+        self.assertIsNotNone(created)
+        assert created is not None
+        self.assertEqual(created.preset_id, "preset_silent_pod")
+        self.assertEqual(created.title, "静音舱预约")
+
 
 if __name__ == "__main__":
     unittest.main()

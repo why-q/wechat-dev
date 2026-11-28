@@ -115,12 +115,6 @@ def _render_inbox_reply_control(
         else:
             summary_text = "回复"
         show_val = "all" if show_closed else "open"
-        draft_html = (
-            '<label class="confirm-label"><input type="checkbox" name="save_preset_draft" value="yes"> '
-            "同时生成 1. 标准模板草稿</label>"
-            if can_draft_preset
-            else ""
-        )
         return (
             '<details class="inbox-reply-details">'
             f"<summary>{_esc(summary_text)}</summary>"
@@ -130,7 +124,7 @@ def _render_inbox_reply_control(
             '<textarea class="form-control reply-textarea" name="reply_text" rows="2" maxlength="900" '
             'required placeholder="输入要直接发送给读者的微信回复（≤1800字节）"></textarea>'
             '<div class="reply-form-actions">'
-            f"{draft_html}"
+            '<span class="panel-note">后台自动扫描是否可沉淀为 1. 标准模板</span>'
             '<button class="button button--xs" type="submit">发送微信回复</button>'
             "</div>"
             "</form>"

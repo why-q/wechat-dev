@@ -135,6 +135,20 @@ _FOLLOW_UP_MARKERS = (
 _DISTINCT_NEW_TOPIC_RE = re.compile(
     r"(?:几点(?:开馆|关门|闭馆|开门)|开馆时间|闭馆时间|饮水机在哪里|WiFi|校园网|怎么借书|图书怎么预约|怎么荐购|推荐购买)"
 )
+_READER_ACK_CLOSE_RE = re.compile(
+    r"^(?:(?:好的?|好滴|好哒|嗯嗯?|哦哦?|ok|okay|收到|明白(?:了)?|懂了|知道了|了解(?:了)?|没问题(?:了)?|可以了|解决(?:了|啦)|不用了|谢谢(?:您|你|老师|馆员|啦|呀)?|多谢(?:啦)?|感谢(?:您|你|老师)?|非常感谢|太感谢(?:您|你|了)?|thanks|thank\s*you|thx)[，,。.！!~～\s]*){1,3}$",
+    re.IGNORECASE,
+)
+
+
+def is_reader_closing_ack(text: str) -> bool:
+    """Return True when a short message is a pure gratitude/acknowledgment with no follow-up question."""
+    normalized = _normalize_for_match(_WECHAT_EMOJI_RE.sub("", text or ""))
+    if not normalized or len(normalized) > 24:
+        return False
+    if "?" in normalized or "？" in normalized:
+        return False
+    return _READER_ACK_CLOSE_RE.match(normalized) is not None
 
 
 @dataclass(frozen=True, slots=True)

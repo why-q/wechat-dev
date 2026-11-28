@@ -18,6 +18,7 @@ from .auth import (
     verify_password,
 )
 from .db import (
+    DEFAULT_AUTO_CLOSE_REPLIED_SECONDS,
     DEFAULT_CLARIFICATION_TTL_SECONDS,
     DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
@@ -52,6 +53,7 @@ from .filters import (
     FilterDecision,
     classify_message,
     default_same_case_matcher,
+    is_reader_closing_ack,
 )
 from .knowledge import (
     DEFAULT_LONG_ANSWER_CHARS,
@@ -72,6 +74,7 @@ from .preset_workflow import (
     audit_preset_for_publish,
     compute_preset_diff,
     deterministic_preset_guardrails,
+    evaluate_and_generate_preset_proposal,
     generate_preset_proposal,
 )
 from .presets import (

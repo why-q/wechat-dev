@@ -426,6 +426,68 @@ def generate_preset_proposal(
     )
 
 
+def evaluate_and_generate_preset_proposal(
+    *,
+    question: str,
+    staff_reply: str,
+    catalog: PresetCatalog,
+    llm_fn: LlmJsonFn | None = None,
+) -> PresetDraftProposal | None:
+    """Automatically judge whether a librarian reply can become a reusable `1.` preset and generate a draft.
+
+    Returns ``None`` when the interaction is a one-off personal case, brief greeting/ack,
+    or lacks reusable public library guidance (keeping the review queue noise-free).
+    """
+    clean_q = (question or "").strip()
+    clean_r = (staff_reply or "").strip()
+    if len(clean_r) < 12:
+        return None
+
+    system_prompt = (
+        "你是高校图书馆知识库筛选与模板整理专家。你需要先判断一轮「读者提问 + 馆员回复」"
+        "是否包含可复用的公共图书馆规则、服务流程或通用指引，决定是否值得沉淀为 `1.` 标准问答模板。\n"
+        "如果只是纯个案处理（如单独查某人账号/罚款/特例放行/已帮您处理）、纯礼貌寒暄、或信息太少无法形成通用答案，"
+        "必须返回 should_create_draft=false。\n"
+        "如果具备公共复用价值，返回 should_create_draft=true，并完成脱敏、去个案化与结构化整理；"
+        "若与现有 1. 模板同属一个业务范畴，必须设置 mode='merge' 并融合改写（不得机械 append）。\n"
+        "仅返回严格 JSON："
+        '{"should_create_draft": true/false, "skip_reason": "...", '
+        '"mode": "create"|"merge", "target_preset_id": "...", "preset_id": "...", '
+        '"title": "...", "aliases": ["..."], "applicability": "...", "body": "...", "note": "..."}'
+    )
+    user_payload = {
+        "reader_question": clean_q,
+        "staff_reply": clean_r,
+        "existing_presets": _build_catalog_digest(catalog),
+    }
+    user_prompt = json.dumps(user_payload, ensure_ascii=False, indent=2)
+
+    caller: LlmJsonFn | None = llm_fn
+    if caller is None:
+        default_llm = OpenAICompatiblePresetLLM()
+        if not default_llm.is_configured:
+            return None
+        caller = default_llm.complete_json
+
+    try:
+        raw = caller(system_prompt, user_prompt)
+    except Exception:
+        return None
+
+    if not isinstance(raw, dict):
+        return None
+    if "should_create_draft" in raw and not bool(raw.get("should_create_draft")):
+        return None
+
+    # Reuse normal proposal normalization logic via a single-shot wrapper.
+    return generate_preset_proposal(
+        question=clean_q,
+        staff_reply=clean_r,
+        catalog=catalog,
+        llm_fn=lambda _s, _u: raw,
+    )
+
+
 def audit_preset_for_publish(
     *,
     mode: str,

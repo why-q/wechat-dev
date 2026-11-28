@@ -17,7 +17,7 @@ import re
 from typing import Any
 from urllib.parse import parse_qsl, quote, urlsplit
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from .auth import (
@@ -48,7 +48,11 @@ from .dashboard_pages import (
     render_presets_review_page,
 )
 from .db import SupportStore
-from .preset_workflow import audit_preset_for_publish, generate_preset_proposal
+from .preset_workflow import (
+    audit_preset_for_publish,
+    evaluate_and_generate_preset_proposal,
+    generate_preset_proposal,
+)
 from .presets import PresetCatalog, write_dynamic_preset
 
 _SESSION_COOKIE_NAME = "library_dashboard_session"
@@ -743,13 +747,13 @@ _USER_RESULT_NOTICES: dict[str, tuple[str, str]] = {
 }
 _LIBRARIAN_RESULT_NOTICES: dict[str, tuple[str, str]] = {
     "closed": ("工单已标记结案。", "info"),
-    "replied": ("微信回复已发送给读者。", "info"),
+    "replied": ("微信回复已发送，工单已标记为「已处理」（读者致谢或超 24h 无追问自动结案）；后台正自动扫描可沉淀的 1. 标准模板。", "info"),
     "replied-closed": ("微信回复已发送，且工单已结案。", "info"),
     "replied-draft": ("微信回复已发送，并已生成 1. 标准模板草稿，请前往「标准模板」查看审核。", "info"),
     "replied-closed-draft": ("微信回复已发送、工单已结案，并已生成 1. 标准模板草稿。", "info"),
     "draft-created": ("已生成 1. 标准模板草稿，请前往「标准模板」查看审核。", "info"),
     "quota-blocked": ("已超 48 小时互动窗口或已达 5 条发送上限，无法通过接口发信，请前往微信公众号后台回复。", "error"),
-    "send-failed": ("微信客服消息发送失败（工单未自动结案），请检查错误或前往微信公众号后台回复。", "error"),
+    "send-failed": ("微信客服消息发送失败（工单状态未变更），请检查错误或前往微信公众号后台回复。", "error"),
     "not-found": ("未找到对应工单或私信，或状态已变更。", "error"),
     "invalid": ("操作未执行，请检查输入内容（单条回复不超过 1800 字节）或确认勾选。", "error"),
 }
@@ -1038,6 +1042,51 @@ def _dynamic_presets_dir(request: Request, store: SupportStore | None) -> Path |
     return None
 
 
+def _auto_scan_preset_draft_sync(
+    *,
+    store: SupportStore,
+    catalog: PresetCatalog,
+    question: str,
+    staff_reply: str,
+    created_by: str,
+    source_case_id: int | None = None,
+    source_event_seq: int | None = None,
+    llm_fn: PresetLlmFn | None = None,
+) -> None:
+    """Background scan evaluating whether a librarian reply should become a 1. preset draft."""
+    try:
+        existing_drafts = store.list_preset_drafts(status="draft", limit=100)
+        if source_case_id is not None and any(d.get("source_case_id") == source_case_id for d in existing_drafts):
+            return
+        if source_event_seq is not None and any(d.get("source_event_seq") == source_event_seq for d in existing_drafts):
+            return
+        proposal = evaluate_and_generate_preset_proposal(
+            question=question,
+            staff_reply=staff_reply,
+            catalog=catalog,
+            llm_fn=llm_fn,
+        )
+        if proposal is None:
+            return
+        store.create_preset_draft(
+            source_case_id=source_case_id,
+            source_event_seq=source_event_seq,
+            source_question=question,
+            staff_reply=staff_reply,
+            mode=proposal.mode,
+            target_preset_id=proposal.target_preset_id,
+            preset_id=proposal.preset_id,
+            title=proposal.title,
+            aliases=proposal.aliases,
+            applicability=proposal.applicability,
+            body=proposal.body,
+            ai_generation_note=proposal.note,
+            created_by=created_by,
+        )
+    except Exception:
+        return
+
+
 def create_dashboard_router(
     *,
     admin_password: str = "",
@@ -1197,7 +1246,11 @@ def create_dashboard_router(
         )
 
     @router.post("/dashboard/librarian/cases/{case_id}/reply")
-    async def reply_case_from_dashboard(request: Request, case_id: int) -> Response:
+    async def reply_case_from_dashboard(
+        request: Request,
+        case_id: int,
+        background_tasks: BackgroundTasks,
+    ) -> Response:
         principal, error = _authenticate_principal(
             request,
             settings,
@@ -1244,53 +1297,21 @@ def create_dashboard_router(
         if not delivery.get("ok"):
             return _redirect_librarian("send-failed", view=view, show_closed=show_closed)
 
-        store.append_staff_case_reply(case_id, reply_text, operator_username=principal.username)
-        action = form.get("action", "reply").strip().lower()
-        closed_now = False
-        if action == "reply_and_close" and principal.has_permission(PERM_CLOSE_CASE) and target["status"] == "open":
-            store.close_staff_case(
-                case_id,
-                resolution_note="已在工作台直连回复读者",
-                closed_by=principal.username,
-            )
-            closed_now = True
+        store.mark_staff_case_replied(case_id, reply_text, operator_username=principal.username)
 
-        drafted = False
-        if form.get("save_preset_draft") == "yes" and principal.has_permission(PERM_DRAFT_PRESET):
-            catalog = _active_preset_catalog(request)
-            question = target["latest_message"] or target["summary"]
-            proposal = await asyncio.to_thread(
-                generate_preset_proposal,
-                question=question,
-                staff_reply=reply_text,
-                catalog=catalog,
-                llm_fn=preset_generator_llm_fn,
-            )
-            store.create_preset_draft(
-                source_case_id=case_id,
-                source_question=question,
-                staff_reply=reply_text,
-                mode=proposal.mode,
-                target_preset_id=proposal.target_preset_id,
-                preset_id=proposal.preset_id,
-                title=proposal.title,
-                aliases=proposal.aliases,
-                applicability=proposal.applicability,
-                body=proposal.body,
-                ai_generation_note=proposal.note,
-                created_by=principal.username,
-            )
-            drafted = True
-
-        if closed_now and drafted:
-            code = "replied-closed-draft"
-        elif closed_now:
-            code = "replied-closed"
-        elif drafted:
-            code = "replied-draft"
-        else:
-            code = "replied"
-        return _redirect_librarian(code, view=view, show_closed=show_closed)
+        catalog = _active_preset_catalog(request)
+        question = target["latest_message"] or target["summary"]
+        background_tasks.add_task(
+            _auto_scan_preset_draft_sync,
+            store=store,
+            catalog=catalog,
+            question=question,
+            staff_reply=reply_text,
+            created_by=principal.username,
+            source_case_id=case_id,
+            llm_fn=preset_generator_llm_fn,
+        )
+        return _redirect_librarian("replied", view=view, show_closed=show_closed)
 
     @router.post("/dashboard/librarian/cases/{case_id}/draft-preset")
     async def draft_preset_from_case(request: Request, case_id: int) -> Response:
@@ -1353,7 +1374,11 @@ def create_dashboard_router(
         return _redirect_librarian("draft-created", view=view, show_closed=show_closed)
 
     @router.post("/dashboard/librarian/inbox/{event_seq}/reply")
-    async def reply_inbox_from_dashboard(request: Request, event_seq: int) -> Response:
+    async def reply_inbox_from_dashboard(
+        request: Request,
+        event_seq: int,
+        background_tasks: BackgroundTasks,
+    ) -> Response:
         principal, error = _authenticate_principal(
             request,
             settings,
@@ -1401,39 +1426,26 @@ def create_dashboard_router(
             return _redirect_librarian("send-failed", view=view, show_closed=show_closed)
 
         if target.get("staff_case_id"):
-            store.append_staff_case_reply(
+            store.mark_staff_case_replied(
                 int(target["staff_case_id"]),
                 reply_text,
                 operator_username=principal.username,
             )
 
-        drafted = False
-        if form.get("save_preset_draft") == "yes" and principal.has_permission(PERM_DRAFT_PRESET):
-            catalog = _active_preset_catalog(request)
-            question = str(target.get("content") or "")
-            proposal = await asyncio.to_thread(
-                generate_preset_proposal,
-                question=question,
-                staff_reply=reply_text,
-                catalog=catalog,
-                llm_fn=preset_generator_llm_fn,
-            )
-            store.create_preset_draft(
-                source_event_seq=event_seq,
-                source_question=question,
-                staff_reply=reply_text,
-                mode=proposal.mode,
-                target_preset_id=proposal.target_preset_id,
-                preset_id=proposal.preset_id,
-                title=proposal.title,
-                aliases=proposal.aliases,
-                applicability=proposal.applicability,
-                body=proposal.body,
-                ai_generation_note=proposal.note,
-                created_by=principal.username,
-            )
-            drafted = True
-        return _redirect_librarian("replied-draft" if drafted else "replied", view=view, show_closed=show_closed)
+        catalog = _active_preset_catalog(request)
+        question = str(target.get("content") or "")
+        background_tasks.add_task(
+            _auto_scan_preset_draft_sync,
+            store=store,
+            catalog=catalog,
+            question=question,
+            staff_reply=reply_text,
+            created_by=principal.username,
+            source_case_id=int(target["staff_case_id"]) if target.get("staff_case_id") else None,
+            source_event_seq=event_seq,
+            llm_fn=preset_generator_llm_fn,
+        )
+        return _redirect_librarian("replied", view=view, show_closed=show_closed)
 
     @router.post("/dashboard/librarian/cases/{case_id}/close")
     async def close_case_from_dashboard(request: Request, case_id: int) -> Response:
@@ -1465,8 +1477,8 @@ def create_dashboard_router(
         if not _valid_resolution_note(resolution_note):
             return _redirect_librarian("invalid", view=view, show_closed=show_closed)
 
-        open_ids = {int(item["case_id"]) for item in store.list_staff_cases(limit=200, status="open")}
-        if case_id not in open_ids:
+        target = store.get_staff_case_target(case_id)
+        if target is None or target.get("status") not in ("open", "replied"):
             return _redirect_librarian("not-found", view=view, show_closed=show_closed)
         closed = store.close_staff_case(
             case_id,

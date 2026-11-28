@@ -69,10 +69,15 @@ class SupportPipeline:
         self._last_purge_epoch: float = 0.0
 
     async def purge_expired_now(self) -> int:
-        """Purge expired inbound events whose retention deadline has elapsed."""
+        """Purge expired inbound events and auto-close stale `replied` cases."""
         deleted = await asyncio.to_thread(self.store.purge_expired_events)
-        if deleted > 0:
-            _LOGGER.info("Support expired events purged: deleted=%d", deleted)
+        auto_closed = await asyncio.to_thread(self.store.auto_close_stale_replied_cases)
+        if deleted > 0 or auto_closed > 0:
+            _LOGGER.info(
+                "Support maintenance finished: deleted_events=%d auto_closed_replied=%d",
+                deleted,
+                auto_closed,
+            )
         return deleted
 
     async def start(self) -> list[FlushOutcome]:

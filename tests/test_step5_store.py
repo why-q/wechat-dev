@@ -678,6 +678,112 @@ class Step5StoreTests(unittest.TestCase):
         finally:
             store.close()
 
+    def test_replied_lifecycle_reader_ack_followup_and_timeout_auto_close(self):
+        from support_backend.filters import is_reader_closing_ack
+
+        self.assertTrue(is_reader_closing_ack("谢谢"))
+        self.assertTrue(is_reader_closing_ack("好的，谢谢老师！"))
+        self.assertTrue(is_reader_closing_ack("收到，明白了"))
+        self.assertFalse(is_reader_closing_ack("谢谢，那周末也能预约吗？"))
+        self.assertFalse(is_reader_closing_ack("静音舱怎么预约"))
+
+        now = [1_800_000_000.0]
+        store = SupportStore(self.db_path, clock=lambda: now[0], merge_enabled=True)
+        try:
+            # 1) Create case -> mark_staff_case_replied -> follow-up flips replied -> open
+            case1 = store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_reader_lifecycle_1",
+                summary="静音舱怎么预约",
+                latest_message="静音舱怎么预约？",
+            )
+            self.assertTrue(
+                store.mark_staff_case_replied(
+                    case1.case_id,
+                    "静音舱可以通过图书馆微信小程序提前一天预约。",
+                    operator_username="lib_a",
+                )
+            )
+            self.assertEqual(len(store.list_staff_cases(status="open")), 0)
+            self.assertEqual(len(store.list_staff_cases(status="replied")), 1)
+
+            # Follow-up question from same reader matches replied case & reopens it back to open
+            now[0] += 300.0
+            ev_fu = store.ingest_event(
+                {
+                    "to_user": "gh_lib",
+                    "from_user": "o_reader_lifecycle_1",
+                    "msg_type": "text",
+                    "msg_id": "m_fu_1",
+                    "content": "那个微信小程序叫什么名字？",
+                },
+                classify_message("text", "那个微信小程序叫什么名字？"),
+            )
+            self.assertIsNotNone(ev_fu.batch)
+            outcome = store.flush_batch(ev_fu.batch.batch_id)
+            self.assertIsNotNone(outcome)
+            assert outcome is not None
+            self.assertEqual(outcome.route_stage, "staff_case_appended")
+            self.assertEqual(outcome.staff_case_id, case1.case_id)
+            open_cases = store.list_staff_cases(status="open")
+            self.assertEqual(len(open_cases), 1)
+            self.assertEqual(open_cases[0]["case_id"], case1.case_id)
+            self.assertEqual(open_cases[0]["status"], "open")
+
+            # 2) Reply again -> reader says "好的谢谢老师" -> auto-closes without creating triage batch
+            now[0] += 60.0
+            store.mark_staff_case_replied(
+                case1.case_id,
+                "微信搜索汕头大学图书馆微服务小程序即可预约。",
+                operator_username="lib_a",
+            )
+            self.assertEqual(len(store.list_staff_cases(status="replied")), 1)
+
+            now[0] += 60.0
+            ev_ack = store.ingest_event(
+                {
+                    "to_user": "gh_lib",
+                    "from_user": "o_reader_lifecycle_1",
+                    "msg_type": "text",
+                    "msg_id": "m_ack_1",
+                    "content": "好的，谢谢老师！",
+                },
+                classify_message("text", "好的，谢谢老师！"),
+            )
+            self.assertIsNone(ev_ack.batch)
+            self.assertEqual(ev_ack.staff_case_id, case1.case_id)
+            closed_list = store.list_staff_cases(status="closed")
+            self.assertEqual(len(closed_list), 1)
+            self.assertEqual(closed_list[0]["case_id"], case1.case_id)
+            self.assertEqual(closed_list[0]["closed_by"], "auto:reader_ack")
+            self.assertEqual(closed_list[0]["messages"][-1]["content"], "好的，谢谢老师！")
+
+            # 3) Timeout auto-close after 24h with no reader reply
+            case2 = store.create_staff_case(
+                account_id="gh_lib",
+                reader_id="o_reader_lifecycle_2",
+                summary="研习室插座问题",
+                latest_message="三楼研习室插座没电了",
+            )
+            store.mark_staff_case_replied(
+                case2.case_id,
+                "已安排电工老师前往三楼研习室检查处理。",
+                operator_username="lib_b",
+            )
+            # 12h later: still replied
+            now[0] += 12 * 3600.0
+            self.assertEqual(store.auto_close_stale_replied_cases(), 0)
+            self.assertEqual(len(store.list_staff_cases(status="replied")), 1)
+
+            # 25h later: auto-closed with closed_by='auto:timeout'
+            now[0] += 13 * 3600.0
+            self.assertEqual(store.auto_close_stale_replied_cases(), 1)
+            self.assertEqual(len(store.list_staff_cases(status="replied")), 0)
+            closed2 = next(c for c in store.list_staff_cases(status="closed") if c["case_id"] == case2.case_id)
+            self.assertEqual(closed2["closed_by"], "auto:timeout")
+        finally:
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

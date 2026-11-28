@@ -294,19 +294,19 @@ class Step5EndToEndRouteTests(unittest.TestCase):
         )
         bob_cookie = self._login("bob_staff", "bob-password-123")
 
-        # 1) Send failure must NOT close the case
+        # 1) Send failure must NOT change case status
         self.send_should_fail = True
         fail_resp = self.client.request(
             "POST",
             f"/dashboard/librarian/cases/{case.case_id}/reply",
-            body=urlencode({"reply_text": "先回复试试", "action": "reply_and_close"}).encode(),
+            body=urlencode({"reply_text": "先回复试试"}).encode(),
             headers={**self.same_origin, "cookie": bob_cookie},
         )
         self.assertEqual(fail_resp.status_code, 303)
         self.assertIn("result=send-failed", fail_resp.headers["location"])
         self.assertEqual(len(self.store.list_staff_cases(status="open")), 1)
 
-        # 2) Successful reply + close + generate preset draft
+        # 2) Successful single-button reply marks case as `replied` and auto-scans preset draft in background
         self.send_should_fail = False
         ok_resp = self.client.request(
             "POST",
@@ -314,38 +314,38 @@ class Step5EndToEndRouteTests(unittest.TestCase):
             body=urlencode(
                 {
                     "reply_text": "同学您好，静音舱可以通过预约系统提前一天预约，每次两小时。",
-                    "action": "reply_and_close",
-                    "save_preset_draft": "yes",
                 }
             ).encode(),
             headers={**self.same_origin, "cookie": bob_cookie},
         )
         self.assertEqual(ok_resp.status_code, 303)
-        self.assertIn("result=replied-closed-draft", ok_resp.headers["location"])
+        self.assertIn("result=replied", ok_resp.headers["location"])
         self.assertEqual(len(self.sent_messages), 1)
         self.assertEqual(self.sent_messages[0][0], "o_reader_live_1")
         self.assertEqual(len(self.store.list_staff_cases(status="open")), 0)
+        self.assertEqual(len(self.store.list_staff_cases(status="replied")), 1)
 
-        # 3) Default librarian view hides closed cases; ?show=all reveals closed case with reply form
+        # 3) Default librarian view hides replied/closed cases; ?show=all reveals it with 「已处理 · 等待读者」
         default_view = self.client.request("GET", "/dashboard/librarian?view=cases", headers={"cookie": bob_cookie})
         self.assertNotIn(f"/dashboard/librarian/cases/{case.case_id}/reply", default_view.text)
         all_view = self.client.request("GET", "/dashboard/librarian?view=cases&show=all", headers={"cookie": bob_cookie})
         self.assertIn("静音舱预约咨询", all_view.text)
+        self.assertIn("已处理 · 等待读者", all_view.text)
         self.assertIn(f"/dashboard/librarian/cases/{case.case_id}/reply", all_view.text)
         self.assertNotIn("o_reader_live_1", all_view.text)
 
-        # Replying to a CLOSED case also succeeds within 48h window
+        # Follow-up reply on a `replied` case also succeeds within 48h window without duplicating active draft
         followup = self.client.request(
             "POST",
             f"/dashboard/librarian/cases/{case.case_id}/reply",
-            body=urlencode({"reply_text": "补充说明：请提前10分钟签到。", "action": "reply", "show": "all"}).encode(),
+            body=urlencode({"reply_text": "补充说明：请提前10分钟签到。", "show": "all"}).encode(),
             headers={**self.same_origin, "cookie": bob_cookie},
         )
         self.assertEqual(followup.status_code, 303)
         self.assertIn("result=replied", followup.headers["location"])
         self.assertEqual(len(self.sent_messages), 2)
 
-        # Replying directly on 48h inbox event also works
+        # Replying directly on 48h inbox event also works (and does not duplicate active case draft)
         inbox_reply = self.client.request(
             "POST",
             f"/dashboard/librarian/inbox/{ev.seq}/reply",

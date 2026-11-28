@@ -461,18 +461,10 @@ def _render_reply_form(
 
     safe_id = _safe_case_id(case.get("case_id", ""))
     show_val = "all" if show_closed else "open"
-    is_open = str(case.get("status") or "open").strip().lower() == "open"
-    draft_html = (
-        '<label class="confirm-label"><input type="checkbox" name="save_preset_draft" value="yes"> '
-        "同时生成 1. 标准模板草稿</label>"
+    hint_html = (
+        '<span class="panel-note">发送后标记为已处理，后台自动扫描是否可沉淀为 1. 标准模板</span>'
         if can_draft_preset
-        else ""
-    )
-    reply_and_close_html = (
-        '<button class="button button--quiet button--xs" type="submit" name="action" value="reply_and_close">'
-        "发送并结案</button>"
-        if (can_close and is_open)
-        else ""
+        else '<span class="panel-note">发送后标记为已处理，读者致谢或 24h 无追问自动结案</span>'
     )
     return (
         f"{badge_wrap}"
@@ -482,9 +474,8 @@ def _render_reply_form(
         '<textarea class="form-control reply-textarea" name="reply_text" rows="2" maxlength="900" '
         'required placeholder="输入直接发送给读者的微信回复（≤1800字节）"></textarea>'
         '<div class="reply-form-actions">'
-        f"{draft_html}"
-        '<button class="button button--xs" type="submit" name="action" value="reply">发送回复</button>'
-        f"{reply_and_close_html}"
+        f"{hint_html}"
+        '<button class="button button--xs" type="submit">发送回复</button>'
         "</div>"
         "</form>"
     )
@@ -711,7 +702,7 @@ def _render_closed_cases_section(
     count = len(closed_cases)
     section_head = (
         '<div class="subsection-title closed-cases-head">'
-        "<h3>已结案工单</h3>"
+        "<h3>已处理 / 已结案工单</h3>"
         f"<span>{count} 条</span>"
         "</div>"
     )
@@ -719,28 +710,40 @@ def _render_closed_cases_section(
         return (
             '<div class="closed-cases-section">'
             f"{section_head}"
-            '<p class="panel-note">暂无已结案工单。</p>'
+            '<p class="panel-note">暂无已处理或已结案工单。</p>'
             "</div>"
         )
 
     details_label = _details_summary_label(can_reply=can_reply, can_close=False, is_open=False)
     rows: list[str] = []
     for case in closed_cases:
-        summary = _truncate(str(case.get("summary") or case.get("latest_message") or "已结工单"), limit=48)
+        summary = _truncate(str(case.get("summary") or case.get("latest_message") or "已处理工单"), limit=48)
+        row_status = str(case.get("status") or "closed").strip().lower()
+        is_replied = row_status == "replied"
+        status_badge = (
+            '<span class="badge good">已处理 · 等待读者</span>'
+            if is_replied
+            else '<span class="badge muted">已结案</span>'
+        )
         closed_at = str(case.get("closed_at_utc8") or case.get("closed_hm") or "").strip()
         closed_by = str(case.get("closed_by") or "").strip()
         resolution_note = str(case.get("resolution_note") or "").strip()
 
         meta_parts: list[str] = []
-        if closed_at:
-            meta_parts.append(f"结案于 {closed_at}")
-        if closed_by:
-            meta_parts.append(f"经办 {closed_by}")
+        if is_replied:
+            if closed_at:
+                meta_parts.append(f"回复于 {closed_at}")
+            meta_parts.append("读者致谢或 24h 无追问将自动结案")
+        else:
+            if closed_at:
+                meta_parts.append(f"结案于 {closed_at}")
+            if closed_by:
+                meta_parts.append(f"经办 {closed_by}")
         meta_html = f'<p class="case-meta"><span>{_esc(" · ".join(meta_parts))}</span></p>' if meta_parts else ""
         note_html = f'<p class="case-meta"><span>备注：{_esc(resolution_note)}</span></p>' if resolution_note else ""
 
         closed_case_payload = dict(case)
-        closed_case_payload["status"] = "closed"
+        closed_case_payload["status"] = row_status
         thread_html = _render_case_thread(closed_case_payload)
         reply_html = _render_reply_form(
             closed_case_payload,
@@ -758,7 +761,7 @@ def _render_closed_cases_section(
         rows.append(
             '<li class="queue-row queue-row--closed">'
             '<div class="queue-title-line">'
-            '<span class="badge good">已结案</span>'
+            f"{status_badge}"
             f"<h3>{_esc(summary)}</h3>"
             "</div>"
             f"{meta_html}"

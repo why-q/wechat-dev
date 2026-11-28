@@ -23,7 +23,7 @@ from .auth import (
     valid_username,
     verify_password,
 )
-from .filters import FilterDecision
+from .filters import FilterDecision, is_reader_closing_ack
 from .schema import (
     SCHEMA_SQL as _SCHEMA_SQL,
     SCHEMA_VERSION,
@@ -45,6 +45,7 @@ DEFAULT_MERGE_ENABLED = False
 DEFAULT_MAX_PREEMPTS = 2
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 3600
 DEFAULT_CLARIFICATION_TTL_SECONDS = 1800.0
+DEFAULT_AUTO_CLOSE_REPLIED_SECONDS = 24 * 3600.0
 WECHAT_INTERACTION_WINDOW_SECONDS = 48 * 3600
 WECHAT_INTERACTION_QUOTA_LIMIT = 5
 
@@ -360,26 +361,56 @@ class SupportStore:
                 queued_behind_batch_id: int | None = None
                 allowlist_enrolled: bool | None = None
 
-                if decision.category == "question" and reader_id:
-                    if self.merge_enabled:
-                        batch_id = self._enqueue_debounce_locked(
+                if decision.category == "invalid" and reader_id and is_reader_closing_ack(content_raw):
+                    closed_ack_id = self._auto_close_replied_case_on_ack_locked(
+                        account_id=account_id,
+                        reader_id=reader_id,
+                        ack_text=content_raw,
+                        event_seq=seq,
+                        now_epoch=now_epoch,
+                    )
+                    if closed_ack_id is not None:
+                        staff_case_id = closed_ack_id
+                        self._conn.execute(
+                            "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
+                            (staff_case_id, seq),
+                        )
+
+                elif decision.category == "question" and reader_id:
+                    if is_reader_closing_ack(content_raw):
+                        closed_ack_id = self._auto_close_replied_case_on_ack_locked(
                             account_id=account_id,
                             reader_id=reader_id,
-                            seq=seq,
-                            text_content=decision.normalized_text,
+                            ack_text=content_raw,
+                            event_seq=seq,
                             now_epoch=now_epoch,
                         )
-                    else:
-                        batch_id, preempted_batch_id, queued_behind_batch_id = (
-                            self._enqueue_immediate_locked(
+                        if closed_ack_id is not None:
+                            staff_case_id = closed_ack_id
+                            self._conn.execute(
+                                "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
+                                (staff_case_id, seq),
+                            )
+                    if staff_case_id is None:
+                        if self.merge_enabled:
+                            batch_id = self._enqueue_debounce_locked(
                                 account_id=account_id,
                                 reader_id=reader_id,
                                 seq=seq,
                                 text_content=decision.normalized_text,
                                 now_epoch=now_epoch,
                             )
-                        )
-                    batch_snapshot = self.get_batch(batch_id)
+                        else:
+                            batch_id, preempted_batch_id, queued_behind_batch_id = (
+                                self._enqueue_immediate_locked(
+                                    account_id=account_id,
+                                    reader_id=reader_id,
+                                    seq=seq,
+                                    text_content=decision.normalized_text,
+                                    now_epoch=now_epoch,
+                                )
+                            )
+                        batch_snapshot = self.get_batch(batch_id)
 
                 elif decision.category == "feedback":
                     feedback_id = self._record_feedback_locked(
@@ -898,6 +929,55 @@ class SupportStore:
         ).fetchall()
         return " ".join(str(r["content"] or "").strip() for r in rows if str(r["content"] or "").strip())
 
+    def _auto_close_replied_case_on_ack_locked(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        ack_text: str,
+        event_seq: int | None,
+        now_epoch: float,
+    ) -> int | None:
+        """Close the reader's latest `replied` staff case when they reply with thanks/ack."""
+        row = self._conn.execute(
+            """
+            SELECT case_id, resolution_note FROM staff_cases
+            WHERE account_id = ? AND reader_id = ? AND status = 'replied'
+            ORDER BY updated_at_epoch DESC, case_id DESC
+            LIMIT 1
+            """,
+            (account_id or "default", reader_id),
+        ).fetchone()
+        if row is None:
+            return None
+        case_id = int(row["case_id"])
+        now_utc = _utc_iso(now_epoch)
+        existing_note = str(row["resolution_note"] or "").strip()
+        final_note = existing_note or "读者已确认收到回复，系统自动结案"
+        self._conn.execute(
+            """
+            UPDATE staff_cases
+            SET status = 'closed',
+                closed_at_utc = ?,
+                closed_by = 'auto:reader_ack',
+                updated_at_epoch = ?,
+                updated_at_utc = ?,
+                resolution_note = ?
+            WHERE case_id = ?
+            """,
+            (now_utc, now_epoch, now_utc, final_note, case_id),
+        )
+        if ack_text.strip():
+            self._conn.execute(
+                """
+                INSERT INTO staff_case_messages(
+                    case_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
+                ) VALUES (?, ?, 'reader', ?, ?, ?)
+                """,
+                (case_id, event_seq, ack_text.strip(), now_epoch, now_utc),
+            )
+        return case_id
+
     def _compute_batch_route_locked(
         self,
         *,
@@ -907,11 +987,11 @@ class SupportStore:
         now_epoch: float,
     ) -> tuple[tuple[int, ...], str, str, int | None, str]:
         event_seqs, merged_text = self._ordered_batch_texts_locked(batch_id)
-        open_case_row = self._conn.execute(
+        active_case_row = self._conn.execute(
             """
             SELECT * FROM staff_cases
-            WHERE account_id = ? AND reader_id = ? AND case_kind = 'staff_todo' AND status = 'open'
-            ORDER BY updated_at_epoch DESC, case_id DESC
+            WHERE account_id = ? AND reader_id = ? AND case_kind = 'staff_todo' AND status IN ('open', 'replied')
+            ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, updated_at_epoch DESC, case_id DESC
             LIMIT 1
             """,
             (account_id, reader_id),
@@ -919,12 +999,12 @@ class SupportStore:
         route_stage = "ready_for_triage"
         matched_case_id: int | None = None
         same_case_reason = "no_open_case"
-        if open_case_row is not None:
-            case_dict = self._row_to_case(open_case_row).to_dict()
-            case_dict["recent_messages_text"] = self._recent_case_messages_text_locked(int(open_case_row["case_id"]))
+        if active_case_row is not None:
+            case_dict = self._row_to_case(active_case_row).to_dict()
+            case_dict["recent_messages_text"] = self._recent_case_messages_text_locked(int(active_case_row["case_id"]))
             is_same, same_case_reason = self._same_case_matcher(merged_text, case_dict, now_epoch)
             if is_same:
-                matched_case_id = int(open_case_row["case_id"])
+                matched_case_id = int(active_case_row["case_id"])
                 route_stage = "staff_case_appended"
         return event_seqs, merged_text, route_stage, matched_case_id, same_case_reason
 
@@ -966,7 +1046,11 @@ class SupportStore:
             self._conn.execute(
                 """
                 UPDATE staff_cases
-                SET latest_message = ?, updated_at_epoch = ?, updated_at_utc = ?
+                SET status = 'open',
+                    closed_at_utc = NULL,
+                    latest_message = ?,
+                    updated_at_epoch = ?,
+                    updated_at_utc = ?
                 WHERE case_id = ?
                 """,
                 (merged_text, now_epoch, now_utc, matched_case_id),
@@ -1384,6 +1468,78 @@ class SupportStore:
             row = self._conn.execute("SELECT * FROM staff_cases WHERE case_id = ?", (case_id,)).fetchone()
             return self._row_to_case(row) if row is not None else None
 
+    def auto_close_stale_replied_cases(
+        self,
+        *,
+        timeout_seconds: float = DEFAULT_AUTO_CLOSE_REPLIED_SECONDS,
+        now_epoch: float | None = None,
+    ) -> int:
+        """Auto-close `replied` cases when no reader follow-up arrived within timeout_seconds."""
+        if timeout_seconds <= 0:
+            return 0
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            cutoff = now_val - float(timeout_seconds)
+            with self._conn:
+                cursor = self._conn.execute(
+                    """
+                    UPDATE staff_cases
+                    SET status = 'closed',
+                        closed_at_utc = ?,
+                        closed_by = 'auto:timeout',
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?,
+                        resolution_note = CASE
+                            WHEN TRIM(resolution_note) = '' THEN '超24小时无追问自动结案'
+                            ELSE resolution_note
+                        END
+                    WHERE status = 'replied' AND updated_at_epoch <= ?
+                    """,
+                    (now_utc, now_val, now_utc, cutoff),
+                )
+                return int(cursor.rowcount)
+
+    def mark_staff_case_replied(
+        self,
+        case_id: int,
+        reply_content: str,
+        *,
+        operator_username: str = "",
+        now_epoch: float | None = None,
+    ) -> bool:
+        """Append librarian reply and mark an open case as `replied` (handled, awaiting reader)."""
+        text = reply_content.strip()
+        if not text:
+            return False
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT case_id, status FROM staff_cases WHERE case_id = ?", (case_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            next_status = "replied" if str(row["status"]) != "closed" else "closed"
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO staff_case_messages(
+                        case_id, sender_role, content, operator_username, created_at_epoch, created_at_utc
+                    ) VALUES (?, 'staff', ?, ?, ?, ?)
+                    """,
+                    (case_id, text, operator_username.strip(), now_val, now_utc),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE staff_cases
+                    SET status = ?, updated_at_epoch = ?, updated_at_utc = ?
+                    WHERE case_id = ?
+                    """,
+                    (next_status, now_val, now_utc, case_id),
+                )
+            return True
+
     def close_staff_case(
         self,
         case_id: int,
@@ -1408,7 +1564,7 @@ class SupportStore:
                         updated_at_utc = ?,
                         resolution_note = ?,
                         closed_by = ?
-                    WHERE case_id = ? AND status = 'open'
+                    WHERE case_id = ? AND status IN ('open', 'replied')
                     """,
                     (now_utc, now_val, now_utc, clean_note, clean_operator, case_id),
                 )
@@ -2318,7 +2474,7 @@ class SupportStore:
 
             all_closed_rows = self._conn.execute(
                 """
-                SELECT case_id, account_id, reader_id, case_kind, summary, latest_message,
+                SELECT case_id, account_id, reader_id, case_kind, status, summary, latest_message,
                        created_at_epoch, updated_at_epoch, closed_at_utc, resolution_note, closed_by
                 FROM staff_cases
                 WHERE status = 'closed'
@@ -2326,7 +2482,18 @@ class SupportStore:
                 """
             ).fetchall()
 
-            closed_detail_rows = all_closed_rows[:50] if include_closed else []
+            replied_rows = self._conn.execute(
+                """
+                SELECT case_id, account_id, reader_id, case_kind, status, summary, latest_message,
+                       created_at_epoch, updated_at_epoch, closed_at_utc, resolution_note, closed_by
+                FROM staff_cases
+                WHERE status = 'replied'
+                ORDER BY updated_at_epoch DESC, case_id DESC
+                LIMIT 50
+                """
+            ).fetchall()
+
+            closed_detail_rows = (list(replied_rows) + list(all_closed_rows))[:50] if include_closed else []
             msg_case_ids = (
                 [int(r["case_id"]) for r in open_emerg_rows]
                 + [int(r["case_id"]) for r in open_todo_rows]
@@ -2555,13 +2722,14 @@ class SupportStore:
                 cid = int(row["case_id"])
                 created_epoch = float(row["created_at_epoch"])
                 created_dt = _epoch_to_utc8(created_epoch)
+                row_status = str(row["status"] or "closed")
                 closed_epoch = _parse_closed_epoch(row["closed_at_utc"], float(row["updated_at_epoch"]))
                 closed_dt = _epoch_to_utc8(closed_epoch)
                 closed_cases.append(
                     {
                         "case_id": cid,
                         "case_kind": str(row["case_kind"]),
-                        "status": "closed",
+                        "status": row_status,
                         "summary": str(row["summary"]),
                         "latest_message": str(row["latest_message"]),
                         "created_at_utc8": created_dt.strftime("%Y-%m-%d %H:%M"),

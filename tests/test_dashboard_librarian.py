@@ -340,6 +340,33 @@ class LibrarianWorkbenchTests(unittest.TestCase):
         analytics = _sample_analytics()
         analytics["closed_cases"] = [
             {
+                "case_id": 400,
+                "case_kind": "staff_todo",
+                "status": "replied",
+                "summary": "已处理工单-静音舱预约咨询",
+                "closed_at_utc8": "2026-11-28 15:45",
+                "closed_by": "",
+                "resolution_note": "",
+                "reader_id": "o_secret_replied_case_400",
+                "messages": [
+                    {"sender_role": "reader", "content": "静音舱怎么预约？", "created_hm": "15:40"},
+                    {
+                        "sender_role": "staff",
+                        "operator_username": "zhangsan",
+                        "content": "可在预约系统提前一天预约。",
+                        "created_hm": "15:45",
+                    },
+                ],
+                "reply_quota": {
+                    "can_reply": True,
+                    "window_open": True,
+                    "window_remaining_seconds": 12 * 3600,
+                    "sent_in_window": 1,
+                    "quota_limit": 5,
+                    "blocked_reason": "",
+                },
+            },
+            {
                 "case_id": 401,
                 "case_kind": "staff_todo",
                 "status": "closed",
@@ -365,7 +392,7 @@ class LibrarianWorkbenchTests(unittest.TestCase):
                     "quota_limit": 5,
                     "blocked_reason": "",
                 },
-            }
+            },
         ]
 
         # Default show_closed=False hides closed_cases section
@@ -376,7 +403,7 @@ class LibrarianWorkbenchTests(unittest.TestCase):
         self.assertNotIn("已结案工单-借阅权限咨询", open_only)
         self.assertNotIn('action="/dashboard/librarian/cases/401/reply"', open_only)
 
-        # show_closed=True shows closed cases with direct reply form + draft-preset form
+        # show_closed=True shows replied & closed cases with distinct badges and single reply button
         with_closed = render_librarian_workbench(
             analytics,
             inbox_html="",
@@ -388,8 +415,10 @@ class LibrarianWorkbenchTests(unittest.TestCase):
         )
         self.assertIn('href="/dashboard/librarian?view=cases">仅看未结案</a>', with_closed)
         self.assertIn('href="/dashboard/librarian?view=cases&show=all" aria-current="true">显示全部工单（含已结）</a>', with_closed)
+        self.assertIn("已处理工单-静音舱预约咨询", with_closed)
+        self.assertIn('<span class="badge good">已处理 · 等待读者</span>', with_closed)
         self.assertIn("已结案工单-借阅权限咨询", with_closed)
-        self.assertIn('<span class="badge good">已结案</span>', with_closed)
+        self.assertIn('<span class="badge muted">已结案</span>', with_closed)
         self.assertIn("2026-11-28 15:40", with_closed)
         self.assertIn("zhangsan", with_closed)
         self.assertIn("馆员 (zhangsan) 15:35：", with_closed)
@@ -398,13 +427,15 @@ class LibrarianWorkbenchTests(unittest.TestCase):
         self.assertIn('action="/dashboard/librarian/cases/401/draft-preset"', with_closed)
         self.assertIn("生成模板草稿", with_closed)
         self.assertIn('<input type="hidden" name="show" value="all">', with_closed)
-        self.assertIn('name="save_preset_draft" value="yes"', with_closed)
+        self.assertNotIn('name="save_preset_draft"', with_closed)
+        self.assertIn("发送后标记为已处理，后台自动扫描是否可沉淀为 1. 标准模板", with_closed)
         # Closed case must NOT have a close form
         self.assertNotIn('action="/dashboard/librarian/cases/401/close"', with_closed)
-        # Open cases DO have reply + reply_and_close
+        # Open cases DO have single merged reply button (no reply_and_close)
         self.assertIn('action="/dashboard/librarian/cases/101/reply"', with_closed)
         self.assertIn('action="/dashboard/librarian/cases/201/reply"', with_closed)
-        self.assertIn('value="reply_and_close"', with_closed)
+        self.assertNotIn('value="reply_and_close"', with_closed)
+        self.assertIn(">发送回复</button>", with_closed)
         self.assertNotIn("o_secret_", with_closed)
 
     def test_permissions_hide_reply_close_and_draft_controls(self):
