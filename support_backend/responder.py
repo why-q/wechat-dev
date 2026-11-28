@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass
 import inspect
 import logging
+from pathlib import Path
+import threading
 from typing import Any, Awaitable, Callable
 
 from .db import FlushOutcome, SupportStore
@@ -69,6 +71,8 @@ class SupportResponder:
         clarify_generator: ClarifyGeneratorFn | None = None,
         preset_min_confidence: float = DEFAULT_PRESET_MIN_CONFIDENCE,
         clarify_ttl_seconds: float = 1800.0,
+        corpus_dir: Path | None = None,
+        dynamic_presets_dir: Path | None = None,
     ) -> None:
         self.store = store
         self.preset_catalog = preset_catalog
@@ -77,6 +81,18 @@ class SupportResponder:
         self.clarify_generator = clarify_generator
         self.preset_min_confidence = float(preset_min_confidence)
         self.clarify_ttl_seconds = float(clarify_ttl_seconds)
+        self.corpus_dir = Path(corpus_dir) if corpus_dir is not None else None
+        self.dynamic_presets_dir = Path(dynamic_presets_dir) if dynamic_presets_dir is not None else None
+        self._preset_lock = threading.RLock()
+
+    def reload_presets(self) -> int:
+        """Thread-safely reload the runtime PresetCatalog from static + dynamic corpus directories."""
+        with self._preset_lock:
+            if self.corpus_dir is None and self.dynamic_presets_dir is None:
+                return len(self.preset_catalog.presets)
+            new_catalog = PresetCatalog.from_corpus_dirs(self.corpus_dir, self.dynamic_presets_dir)
+            self.preset_catalog = new_catalog
+            return len(new_catalog.presets)
 
     @staticmethod
     def _fallback_plan(
@@ -129,8 +145,11 @@ class SupportResponder:
             else merged_text
         )
 
+        with self._preset_lock:
+            preset_catalog = self.preset_catalog
+
         # Tier 1a: Exact symmetric alias match against `1.` presets.
-        exact_hit = self.preset_catalog.match_exact(merged_text)
+        exact_hit = preset_catalog.match_exact(merged_text)
         if exact_hit is not None:
             return TriagePlan(
                 stage_path="exact_alias",
@@ -153,6 +172,7 @@ class SupportResponder:
             try:
                 answers, duration_ms = await asyncio.to_thread(
                     self._call_decision_model,
+                    preset_catalog=preset_catalog,
                     combined_question=combined_question,
                     clarified_already=clarified_already,
                     original_question=active_clarify.original_question if active_clarify else "",
@@ -234,7 +254,7 @@ class SupportResponder:
             )
 
         if decision_route == "public_qa" and decision_preset_id and decision_preset_id != "none":
-            chosen_preset = self.preset_catalog.get_by_id(decision_preset_id)
+            chosen_preset = preset_catalog.get_by_id(decision_preset_id)
             confidence_ok = (
                 decision_confidence is None or decision_confidence >= self.preset_min_confidence
             )
@@ -277,8 +297,10 @@ class SupportResponder:
         original_question: str,
         clarify_prompt: str,
         reader_reply: str,
+        preset_catalog: PresetCatalog | None = None,
     ):
         assert self.decision_client is not None
+        active_catalog = preset_catalog if preset_catalog is not None else self.preset_catalog
         preset_list = [
             {
                 "id": p.preset_id,
@@ -286,7 +308,7 @@ class SupportResponder:
                 "applicability": p.applicability,
                 "answer_body": p.body,
             }
-            for p in self.preset_catalog.presets
+            for p in active_catalog.presets
         ]
         state = {
             "question": combined_question,
@@ -312,7 +334,7 @@ class SupportResponder:
         }
         preset_criteria = {
             p.preset_id: f"当读者询问的问题（含续借天数/次数/步骤、开闭馆时间或预约流程）被固定答案「{p.title}」正文与适用条件({p.applicability})覆盖且无报错/异常诉求时选此项。"
-            for p in self.preset_catalog.presets
+            for p in active_catalog.presets
         }
         preset_criteria["none"] = "无适用固定答案（含报错排障、规则细节、适用条件外问题或无需固定答案）。"
 

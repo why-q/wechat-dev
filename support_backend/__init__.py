@@ -46,7 +46,25 @@ from .knowledge import (
     format_grounded_answer,
 )
 from .pipeline import SupportPipeline
-from .presets import PresetCatalog, PresetDocument, normalize_alias_text, split_frontmatter
+from .preset_workflow import (
+    OpenAICompatiblePresetLLM,
+    PresetAuditResult,
+    PresetDraftProposal,
+    audit_preset_for_publish,
+    compute_preset_diff,
+    deterministic_preset_guardrails,
+    generate_preset_proposal,
+)
+from .presets import (
+    PresetCatalog,
+    PresetDocument,
+    export_dynamic_presets,
+    normalize_alias_text,
+    render_preset_markdown,
+    safe_preset_filename,
+    split_frontmatter,
+    write_dynamic_preset,
+)
 from .responder import (
     DEFAULT_CLARIFY_QUESTION,
     DEFAULT_PRESET_MIN_CONFIDENCE,
@@ -82,8 +100,11 @@ __all__ = [
     "GRAY_ENROLL_ALREADY_REPLY",
     "IngestResult",
     "KnowledgeError",
+    "OpenAICompatiblePresetLLM",
+    "PresetAuditResult",
     "PresetCatalog",
     "PresetDocument",
+    "PresetDraftProposal",
     "SCHEMA_VERSION",
     "StaffCaseSnapshot",
     "SupportPipeline",
@@ -93,12 +114,20 @@ __all__ = [
     "Tier2KnowledgeResponder",
     "Tier2Result",
     "TriagePlan",
+    "audit_preset_for_publish",
     "build_chunks_from_corpus",
     "build_systemone_url",
     "build_tier2_index",
     "classify_message",
+    "compute_preset_diff",
     "default_same_case_matcher",
+    "deterministic_preset_guardrails",
+    "export_dynamic_presets",
     "format_grounded_answer",
+    "generate_preset_proposal",
     "normalize_alias_text",
+    "render_preset_markdown",
+    "safe_preset_filename",
     "split_frontmatter",
+    "write_dynamic_preset",
 ]
