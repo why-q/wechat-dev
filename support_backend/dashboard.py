@@ -477,13 +477,16 @@ def _admin_allowlist_panel(store: SupportStore, pipeline: object, metrics: dict[
     entries = store.list_allowlist(limit=200)
     dynamic_total = int(metrics.get("dynamic_allowlist_count", 0))
     static_total = len(getattr(pipeline, "auto_reply_allowlist", ()))
+    batch_form = ""
     batch_controls = ""
     if entries:
-        batch_controls = (
-            '<div class="allowlist-batch-actions">'
+        batch_form = (
             '<form id="allowlist-batch-form" method="post" action="/dashboard/admin/allowlist/remove-batch">'
             '<input type="hidden" name="confirm" value="yes">'
             "</form>"
+        )
+        batch_controls = (
+            '<div class="allowlist-batch-actions">'
             '<details class="batch-confirm" id="batch-remove-details">'
             '<summary class="button button--danger-quiet">删除已选<span id="selected-count"></span></summary>'
             '<span class="trash-confirm-popover">'
@@ -517,6 +520,7 @@ def _admin_allowlist_panel(store: SupportStore, pipeline: object, metrics: dict[
         '<label>读者 OpenID<input class="form-control" name="reader_id" maxlength="255" required autocomplete="off"></label>'
         '<button class="button" type="submit">加入动态名单</button>'
         "</form>"
+        f"{batch_form}"
         '<div class="allowlist-toolbar">'
         '<h3 class="subsection-title">最近更新的动态条目 <span>展示最多 200 条 · 勾选可批量删除</span></h3>'
         f"{batch_controls}"
