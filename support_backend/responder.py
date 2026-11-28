@@ -10,8 +10,9 @@ from pathlib import Path
 import threading
 from typing import Any, Awaitable, Callable
 
-from .db import FlushOutcome, SupportStore
+from .db import DEFAULT_AUTO_CLOSE_REPLIED_SECONDS, FlushOutcome, SupportStore
 from .decision_client import DecisionClientError, SystemOneClient
+from .filters import default_same_case_matcher
 from .knowledge import KnowledgeError, Tier2KnowledgeResponder, strip_model_urls
 from .presets import PresetCatalog
 
@@ -33,6 +34,8 @@ DEFAULT_CLARIFY_QUESTION = (
 )
 
 DEFAULT_PRESET_MIN_CONFIDENCE = 0.65
+DEFAULT_CASE_RELATION_MIN_CONFIDENCE = 0.65
+DEFAULT_REPLIED_CONTINUITY_WINDOW_SECONDS = DEFAULT_AUTO_CLOSE_REPLIED_SECONDS
 
 ClarifyGeneratorFn = Callable[[str, str], Awaitable[str] | str]
 DeliverReplyFn = Callable[..., Awaitable[int]]
@@ -60,6 +63,9 @@ class TriagePlan:
     set_clarification_prompt: str = ""
     create_staff_todo: bool = False
     staff_summary: str = ""
+    target_staff_case_id: int | None = None
+    append_to_staff_case: bool = False
+    close_case_on_ack: bool = False
 
 
 class SupportResponder:
@@ -74,6 +80,8 @@ class SupportResponder:
         knowledge_responder: Tier2KnowledgeResponder | None = None,
         clarify_generator: ClarifyGeneratorFn | None = None,
         preset_min_confidence: float = DEFAULT_PRESET_MIN_CONFIDENCE,
+        case_relation_min_confidence: float = DEFAULT_CASE_RELATION_MIN_CONFIDENCE,
+        replied_continuity_window_seconds: float = DEFAULT_REPLIED_CONTINUITY_WINDOW_SECONDS,
         clarify_ttl_seconds: float = 1800.0,
         corpus_dir: Path | None = None,
         dynamic_presets_dir: Path | None = None,
@@ -84,6 +92,8 @@ class SupportResponder:
         self.knowledge_responder = knowledge_responder
         self.clarify_generator = clarify_generator
         self.preset_min_confidence = float(preset_min_confidence)
+        self.case_relation_min_confidence = float(case_relation_min_confidence)
+        self.replied_continuity_window_seconds = float(replied_continuity_window_seconds)
         self.clarify_ttl_seconds = float(clarify_ttl_seconds)
         self.corpus_dir = Path(corpus_dir) if corpus_dir is not None else None
         self.dynamic_presets_dir = Path(dynamic_presets_dir) if dynamic_presets_dir is not None else None
@@ -167,10 +177,23 @@ class SupportResponder:
             )
 
         # Tier 1b: `/v1/systemone` multi-question `Choice` decision (default 3.0s bounded).
+        # When the reader has an active (`open` or recent `replied`) staff case, we fold
+        # `case_relation` into the exact same single `/v1/systemone` request (zero extra RTT).
+        active_case: dict[str, Any] | None = None
+        if reader_id:
+            active_case = await asyncio.to_thread(
+                self.store.get_latest_active_staff_case,
+                account_id,
+                reader_id,
+                replied_window_seconds=self.replied_continuity_window_seconds,
+            )
+
         decision_route = "unconfigured"
         decision_preset_id = ""
         decision_confidence: float | None = None
         decision_duration_ms: int | None = None
+        case_relation = ""
+        case_relation_confidence: float | None = None
 
         if self.decision_client is not None:
             try:
@@ -182,13 +205,18 @@ class SupportResponder:
                     original_question=active_clarify.original_question if active_clarify else "",
                     clarify_prompt=active_clarify.clarify_prompt if active_clarify else "",
                     reader_reply=merged_text if active_clarify else "",
+                    active_case=active_case,
                 )
                 decision_duration_ms = duration_ms
                 route_ans = answers.get("route")
                 preset_ans = answers.get("preset_id")
+                case_rel_ans = answers.get("case_relation")
                 decision_route = (route_ans.choice if route_ans and route_ans.choice else "unknown").strip()
                 decision_preset_id = (preset_ans.choice if preset_ans and preset_ans.choice else "none").strip()
                 decision_confidence = preset_ans.confidence if preset_ans else None
+                if case_rel_ans is not None and case_rel_ans.choice:
+                    case_relation = case_rel_ans.choice.strip()
+                    case_relation_confidence = case_rel_ans.confidence
             except DecisionClientError as exc:
                 decision_route = "timeout" if exc.reason_code == "timeout" else "error"
                 _LOGGER.warning(
@@ -202,6 +230,69 @@ class SupportResponder:
                     "Decision router unexpected failure, degrading to Tier 2: batch_id=%d reason=%s",
                     outcome.batch.batch_id,
                     type(exc).__name__,
+                )
+
+        if active_case is not None and case_relation:
+            rel_conf_ok = (
+                case_relation_confidence is None
+                or case_relation_confidence >= self.case_relation_min_confidence
+            )
+            active_case_id = int(active_case["case_id"])
+            active_status = str(active_case.get("status") or "").strip().lower()
+            if case_relation == "same_case_ack" and rel_conf_ok and active_status == "replied":
+                return TriagePlan(
+                    stage_path="decision_case_ack_close",
+                    clarified_already=clarified_already,
+                    combined_question=combined_question,
+                    reply_text="",
+                    trigger_kind="case_ack_close",
+                    decision_route=decision_route,
+                    decision_preset_id=decision_preset_id,
+                    decision_confidence=case_relation_confidence,
+                    decision_duration_ms=decision_duration_ms,
+                    consume_clarification=clarified_already,
+                    target_staff_case_id=active_case_id,
+                    close_case_on_ack=True,
+                )
+            if case_relation == "same_case_followup" and rel_conf_ok:
+                return TriagePlan(
+                    stage_path="decision_case_followup",
+                    clarified_already=clarified_already,
+                    combined_question=combined_question,
+                    reply_text=(REOPENED_CASE_FOLLOWUP_REPLY if active_status == "replied" else ""),
+                    trigger_kind="staff_case_reopened",
+                    decision_route=decision_route,
+                    decision_preset_id=decision_preset_id,
+                    decision_confidence=case_relation_confidence,
+                    decision_duration_ms=decision_duration_ms,
+                    consume_clarification=clarified_already,
+                    target_staff_case_id=active_case_id,
+                    append_to_staff_case=True,
+                )
+        elif active_case is not None and decision_route in ("timeout", "error", "unconfigured"):
+            # Layer 2 conservative fallback when decision model is unavailable:
+            # only explicit follow-up markers or clear keyword overlap attach to the active case.
+            is_same, _ = default_same_case_matcher(
+                merged_text,
+                active_case,
+                now_epoch=self.store.now(),
+            )
+            if is_same:
+                active_case_id = int(active_case["case_id"])
+                active_status = str(active_case.get("status") or "").strip().lower()
+                return TriagePlan(
+                    stage_path="fallback_case_followup",
+                    clarified_already=clarified_already,
+                    combined_question=combined_question,
+                    reply_text=(REOPENED_CASE_FOLLOWUP_REPLY if active_status == "replied" else ""),
+                    trigger_kind="staff_case_reopened",
+                    decision_route=decision_route,
+                    decision_preset_id=decision_preset_id,
+                    decision_confidence=decision_confidence,
+                    decision_duration_ms=decision_duration_ms,
+                    consume_clarification=clarified_already,
+                    target_staff_case_id=active_case_id,
+                    append_to_staff_case=True,
                 )
 
         if decision_route == "staff_action":
@@ -322,6 +413,7 @@ class SupportResponder:
         clarify_prompt: str,
         reader_reply: str,
         preset_catalog: PresetCatalog | None = None,
+        active_case: dict[str, Any] | None = None,
     ):
         assert self.decision_client is not None
         active_catalog = preset_catalog if preset_catalog is not None else self.preset_catalog
@@ -334,7 +426,7 @@ class SupportResponder:
             }
             for p in active_catalog.presets
         ]
-        state = {
+        state: dict[str, Any] = {
             "question": combined_question,
             "clarification_history": (
                 {
@@ -348,6 +440,13 @@ class SupportResponder:
             ),
             "presets": preset_list,
         }
+        if active_case is not None:
+            state["active_staff_case"] = {
+                "case_id": int(active_case["case_id"]),
+                "status": str(active_case.get("status") or ""),
+                "summary": str(active_case.get("summary") or ""),
+                "recent_messages": list(active_case.get("recent_messages") or []),
+            }
         route_criteria = {
             "public_qa": "公开信息咨询、借还续借预约/开闭馆规则查询或通用功能排障；只要业务意图明确（未说明校区或图书类别时默认按常规普通规则理解），直接匹配预设或进 Tier 2 检索，不要轻易反问澄清。",
             "clarify": "仅当留言过于简略或存在根本歧义（例如只发「预约」「办证」「那个用不了」），不追问就无法判断对应哪种馆内业务时才选。"
@@ -362,7 +461,7 @@ class SupportResponder:
         }
         preset_criteria["none"] = "无适用固定答案（含报错排障、规则细节、适用条件外问题或无需固定答案）。"
 
-        questions = {
+        questions: dict[str, dict[str, Any]] = {
             "route": {
                 "type": "choice",
                 "instructions": "判断读者留言的下一步客服路由。",
@@ -374,6 +473,16 @@ class SupportResponder:
                 "criteria": preset_criteria,
             },
         }
+        if active_case is not None:
+            questions["case_relation"] = {
+                "type": "choice",
+                "instructions": "结合 state.active_staff_case（读者当前活跃人工工单及馆员最近回复）与最新留言 state.question，判断最新留言与该工单的关系。",
+                "criteria": {
+                    "same_case_followup": "最新留言是对该活跃工单同一事项的追问、补充说明、确认细节、反馈操作结果或继续求助（例如问馆员刚提到的流程/小程序/时间细节、表示试了还是不行等）。",
+                    "same_case_ack": "最新留言表示该工单问题已解决、向馆员致谢或确认收到，无需继续人工跟进（例如「约上了」「找到了」「明白了谢谢」「已解决」）。",
+                    "new_topic": "最新留言是一个全新的、与该活跃工单无关的独立咨询或问题（例如原工单问静音舱，最新留言问打印/借书/开馆时间/WiFi 等）。",
+                },
+            }
         return self.decision_client.evaluate(state=state, questions=questions)
 
     async def _generate_clarify_question(self, combined_question: str) -> str:
@@ -510,8 +619,28 @@ class SupportResponder:
 
         created_case_id: int | None = outcome.staff_case_id
         reopened_existing = False
-        if plan.create_staff_todo and reader_id:
-            source_event_seq = outcome.event_seqs[-1] if outcome.event_seqs else None
+        source_event_seq = outcome.event_seqs[-1] if outcome.event_seqs else None
+
+        if plan.close_case_on_ack and plan.target_staff_case_id is not None and reader_id:
+            closed_case = await asyncio.to_thread(
+                self.store.close_replied_staff_case_on_ack,
+                plan.target_staff_case_id,
+                ack_text=plan.combined_question,
+                source_batch_id=batch_id,
+                source_event_seq=source_event_seq,
+            )
+            created_case_id = closed_case.case_id if closed_case is not None else plan.target_staff_case_id
+        elif plan.append_to_staff_case and plan.target_staff_case_id is not None and reader_id:
+            appended_case = await asyncio.to_thread(
+                self.store.append_followup_to_staff_case,
+                plan.target_staff_case_id,
+                merged_text=plan.combined_question,
+                source_batch_id=batch_id,
+                source_event_seq=source_event_seq,
+            )
+            created_case_id = appended_case.case_id if appended_case is not None else plan.target_staff_case_id
+            reopened_existing = bool(plan.reply_text)
+        elif plan.create_staff_todo and reader_id:
             # Prefer reopening a recently closed matching case to preserve continuous conversation context.
             reopened = await asyncio.to_thread(
                 self.store.reopen_recent_closed_staff_case_if_matching,
@@ -545,7 +674,7 @@ class SupportResponder:
         )
         stage_to_record = (
             "reopened_closed_case_followup"
-            if reopened_existing and plan.stage_path != "reopened_closed_case_followup"
+            if reopened_existing and plan.create_staff_todo and plan.stage_path != "reopened_closed_case_followup"
             else plan.stage_path
         )
 

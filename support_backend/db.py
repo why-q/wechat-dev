@@ -105,6 +105,7 @@ class SupportStore:
         retention_seconds: float = DEFAULT_RETENTION_SECONDS,
         clock: Callable[[], float] = time.time,
         same_case_matcher: SameCaseMatcher = _default_same_case_adapter,
+        defer_case_routing_to_triage: bool = False,
     ) -> None:
         if quiet_seconds <= 0:
             raise ValueError("quiet_seconds must be positive")
@@ -118,6 +119,7 @@ class SupportStore:
         self.merge_enabled = bool(merge_enabled)
         self.max_preempts = int(max_preempts)
         self.retention_seconds = float(retention_seconds)
+        self.defer_case_routing_to_triage = bool(defer_case_routing_to_triage)
         self._clock = clock
         self._same_case_matcher = same_case_matcher
         self._lock = threading.RLock()
@@ -987,6 +989,8 @@ class SupportStore:
         now_epoch: float,
     ) -> tuple[tuple[int, ...], str, str, int | None, str]:
         event_seqs, merged_text = self._ordered_batch_texts_locked(batch_id)
+        if self.defer_case_routing_to_triage:
+            return event_seqs, merged_text, "ready_for_triage", None, "deferred_to_triage"
         active_case_row = self._conn.execute(
             """
             SELECT * FROM staff_cases
@@ -1353,6 +1357,199 @@ class SupportStore:
             row = self._conn.execute("SELECT * FROM staff_cases WHERE case_id = ?", (case_id,)).fetchone()
             assert row is not None
             return self._row_to_case(row)
+
+    def get_latest_active_staff_case(
+        self,
+        account_id: str,
+        reader_id: str,
+        *,
+        replied_window_seconds: float = DEFAULT_AUTO_CLOSE_REPLIED_SECONDS,
+        open_window_seconds: float | None = None,
+        now_epoch: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the reader's latest `open` or recent `replied` staff_todo case with recent thread messages."""
+        if not reader_id:
+            return None
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            acct = account_id or "default"
+            replied_cutoff = now_val - max(0.0, float(replied_window_seconds))
+            if open_window_seconds is not None and open_window_seconds > 0:
+                open_cutoff = now_val - float(open_window_seconds)
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM staff_cases
+                    WHERE account_id = ? AND reader_id = ? AND case_kind = 'staff_todo'
+                      AND (
+                          (status = 'open' AND updated_at_epoch >= ?)
+                          OR (status = 'replied' AND updated_at_epoch >= ?)
+                      )
+                    ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, updated_at_epoch DESC, case_id DESC
+                    LIMIT 1
+                    """,
+                    (acct, reader_id, open_cutoff, replied_cutoff),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    """
+                    SELECT * FROM staff_cases
+                    WHERE account_id = ? AND reader_id = ? AND case_kind = 'staff_todo'
+                      AND (
+                          status = 'open'
+                          OR (status = 'replied' AND updated_at_epoch >= ?)
+                      )
+                    ORDER BY CASE WHEN status = 'open' THEN 0 ELSE 1 END, updated_at_epoch DESC, case_id DESC
+                    LIMIT 1
+                    """,
+                    (acct, reader_id, replied_cutoff),
+                ).fetchone()
+            if row is None:
+                return None
+            case_id = int(row["case_id"])
+            case_dict = self._row_to_case(row).to_dict()
+            msg_rows = self._conn.execute(
+                """
+                SELECT sender_role, content
+                FROM staff_case_messages
+                WHERE case_id = ?
+                ORDER BY item_id DESC
+                LIMIT 6
+                """,
+                (case_id,),
+            ).fetchall()
+            recent_messages = [
+                {
+                    "role": str(m["sender_role"] or "reader"),
+                    "content": str(m["content"] or "").strip(),
+                }
+                for m in reversed(msg_rows)
+                if str(m["content"] or "").strip()
+            ]
+            case_dict["recent_messages"] = recent_messages
+            case_dict["recent_messages_text"] = " ".join(m["content"] for m in recent_messages)
+            return case_dict
+
+    def append_followup_to_staff_case(
+        self,
+        case_id: int,
+        *,
+        merged_text: str,
+        source_batch_id: int | None = None,
+        source_event_seq: int | None = None,
+        now_epoch: float | None = None,
+    ) -> StaffCaseSnapshot | None:
+        """Append a reader follow-up to an existing case and flip it back to `open`."""
+        body = (merged_text or "").strip()
+        if not body:
+            return None
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            existing = self._conn.execute(
+                "SELECT case_id FROM staff_cases WHERE case_id = ?",
+                (case_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE staff_cases
+                    SET status = 'open',
+                        closed_at_utc = NULL,
+                        latest_message = ?,
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?
+                    WHERE case_id = ?
+                    """,
+                    (body, now_val, now_utc, case_id),
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO staff_case_messages(
+                        case_id, batch_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
+                    ) VALUES (?, ?, ?, 'reader', ?, ?, ?)
+                    """,
+                    (case_id, source_batch_id, source_event_seq, body, now_val, now_utc),
+                )
+                if source_batch_id is not None:
+                    self._conn.execute(
+                        "UPDATE merge_batches SET route_stage = 'staff_case_appended', staff_case_id = ? WHERE batch_id = ?",
+                        (case_id, source_batch_id),
+                    )
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
+                        (case_id, source_batch_id),
+                    )
+                elif source_event_seq is not None:
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
+                        (case_id, source_event_seq),
+                    )
+            row = self._conn.execute("SELECT * FROM staff_cases WHERE case_id = ?", (case_id,)).fetchone()
+            return self._row_to_case(row) if row is not None else None
+
+    def close_replied_staff_case_on_ack(
+        self,
+        case_id: int,
+        *,
+        ack_text: str,
+        source_batch_id: int | None = None,
+        source_event_seq: int | None = None,
+        now_epoch: float | None = None,
+    ) -> StaffCaseSnapshot | None:
+        """Auto-close a `replied` case after decision-model confirms natural-language reader ack."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            row = self._conn.execute(
+                "SELECT case_id, resolution_note FROM staff_cases WHERE case_id = ? AND status = 'replied'",
+                (case_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            existing_note = str(row["resolution_note"] or "").strip()
+            final_note = existing_note or "读者已确认问题解决，系统自动结案"
+            body = (ack_text or "").strip()
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE staff_cases
+                    SET status = 'closed',
+                        closed_at_utc = ?,
+                        closed_by = 'auto:reader_ack',
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?,
+                        resolution_note = ?
+                    WHERE case_id = ?
+                    """,
+                    (now_utc, now_val, now_utc, final_note, case_id),
+                )
+                if body:
+                    self._conn.execute(
+                        """
+                        INSERT INTO staff_case_messages(
+                            case_id, batch_id, event_seq, sender_role, content, created_at_epoch, created_at_utc
+                        ) VALUES (?, ?, ?, 'reader', ?, ?, ?)
+                        """,
+                        (case_id, source_batch_id, source_event_seq, body, now_val, now_utc),
+                    )
+                if source_batch_id is not None:
+                    self._conn.execute(
+                        "UPDATE merge_batches SET staff_case_id = ? WHERE batch_id = ?",
+                        (case_id, source_batch_id),
+                    )
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE batch_id = ?",
+                        (case_id, source_batch_id),
+                    )
+                elif source_event_seq is not None:
+                    self._conn.execute(
+                        "UPDATE inbound_events SET staff_case_id = ? WHERE seq = ?",
+                        (case_id, source_event_seq),
+                    )
+            updated = self._conn.execute("SELECT * FROM staff_cases WHERE case_id = ?", (case_id,)).fetchone()
+            return self._row_to_case(updated) if updated is not None else None
 
     def _find_recent_closed_case_locked(
         self,
@@ -2377,6 +2574,9 @@ class SupportStore:
                 "decision_staff": ("决策转人工", "ochre"),
                 "tier2_staff": ("检索转人工", "ochre"),
                 "staff_case_appended": ("追加已有待办", "muted"),
+                "decision_case_followup": ("决策续接原工单", "ochre"),
+                "decision_case_ack_close": ("决策致谢自动结案", "good"),
+                "fallback_case_followup": ("降级续接原工单", "ochre"),
                 "reopened_closed_case_followup": ("追问重开原工单", "ochre"),
                 "clarify_limit_fallback": ("澄清上限兜底", "ochre"),
                 "decision_unknown_fallback": ("超范围兜底", "muted"),

@@ -253,7 +253,8 @@ def default_same_case_matcher(
     now_epoch: float,
     continuation_window_seconds: float = 1800.0,
 ) -> tuple[bool, str]:
-    """Decide whether a merged message continues an open staff case or starts a new question."""
+    """Conservative rule fallback: only explicit follow-up markers or clear keyword overlap."""
+    _ = (now_epoch, continuation_window_seconds)
     normalized = _normalize_for_match(merged_text)
     if not normalized:
         return False, "empty_text"
@@ -276,10 +277,5 @@ def default_same_case_matcher(
     overlap = len(msg_grams & case_grams)
     if overlap >= 2 and not _DISTINCT_NEW_TOPIC_RE.search(normalized):
         return True, "topic_overlap"
-
-    updated_at = open_case.get("updated_at_epoch")
-    within_window = isinstance(updated_at, (int, float)) and (now_epoch - float(updated_at)) <= continuation_window_seconds
-    if within_window and not _DISTINCT_NEW_TOPIC_RE.search(normalized) and len(normalized) <= 40:
-        return True, "active_case_continuation"
 
     return False, "distinct_new_topic"

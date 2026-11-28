@@ -22,6 +22,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from support_backend import (
+    DEFAULT_CASE_RELATION_MIN_CONFIDENCE,
     DEFAULT_DECISION_MODEL,
     DEFAULT_DECISION_TIMEOUT_SECONDS,
     DEFAULT_GRAY_ENROLL_KEYWORD,
@@ -32,6 +33,7 @@ from support_backend import (
     DEFAULT_MIN_SCORE,
     DEFAULT_PRESET_MIN_CONFIDENCE,
     DEFAULT_QUIET_SECONDS,
+    DEFAULT_REPLIED_CONTINUITY_WINDOW_SECONDS,
     DEFAULT_TOP_K,
     PresetCatalog,
     SupportPipeline,
@@ -83,6 +85,12 @@ _SUPPORT_DECISION_TIMEOUT_SECONDS = _env_float(
 )
 _SUPPORT_PRESET_MIN_CONFIDENCE = _env_float(
     "SUPPORT_PRESET_MIN_CONFIDENCE", DEFAULT_PRESET_MIN_CONFIDENCE
+)
+_SUPPORT_CASE_RELATION_MIN_CONFIDENCE = _env_float(
+    "SUPPORT_CASE_RELATION_MIN_CONFIDENCE", DEFAULT_CASE_RELATION_MIN_CONFIDENCE
+)
+_SUPPORT_REPLIED_CONTINUITY_WINDOW_SECONDS = _env_float(
+    "SUPPORT_REPLIED_CONTINUITY_WINDOW_SECONDS", DEFAULT_REPLIED_CONTINUITY_WINDOW_SECONDS
 )
 _SUPPORT_LONG_ANSWER_CHARS = _env_int("SUPPORT_LONG_ANSWER_CHARS", DEFAULT_LONG_ANSWER_CHARS)
 _SUPPORT_TIER2_ENABLED = _env_bool("SUPPORT_TIER2_ENABLED", default=True)
@@ -422,6 +430,7 @@ async def _lifespan(application: FastAPI):
         max_wait_seconds=max_wait_seconds,
         merge_enabled=_SUPPORT_MERGE_ENABLED,
         max_preempts=_SUPPORT_IMMEDIATE_MAX_PREEMPTS,
+        defer_case_routing_to_triage=True,
     )
     corpus_dir = Path(_SUPPORT_CORPUS_DIR_RAW)
     dynamic_presets_raw = os.environ.get("SUPPORT_DYNAMIC_PRESETS_DIR", "").strip()
@@ -470,6 +479,8 @@ async def _lifespan(application: FastAPI):
         knowledge_responder=knowledge_responder,
         clarify_generator=knowledge_responder.generate_clarify_question if knowledge_responder is not None else None,
         preset_min_confidence=_SUPPORT_PRESET_MIN_CONFIDENCE,
+        case_relation_min_confidence=_SUPPORT_CASE_RELATION_MIN_CONFIDENCE,
+        replied_continuity_window_seconds=_SUPPORT_REPLIED_CONTINUITY_WINDOW_SECONDS,
         corpus_dir=corpus_dir,
         dynamic_presets_dir=dynamic_presets_dir,
     )

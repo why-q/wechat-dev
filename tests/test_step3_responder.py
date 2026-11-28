@@ -453,6 +453,175 @@ class Step3OrchestrationTests(unittest.TestCase):
 
         asyncio.run(run_http())
 
+    def test_joint_systemone_case_relation_followup_new_topic_ack_exact_alias_and_timeout_fallback(self):
+        from support_backend.decision_client import DecisionAnswer, DecisionClientError
+        from support_backend.responder import REOPENED_CASE_FOLLOWUP_REPLY
+
+        async def scenario():
+            store = SupportStore(
+                self.db_path,
+                merge_enabled=False,
+                defer_case_routing_to_triage=True,
+            )
+            sent: list[tuple[str, str]] = []
+            decision_calls: list[dict[str, object]] = []
+            next_decision: dict[str, object] = {"mode": "ok", "answers": {}}
+
+            class FakeDecisionClient:
+                def evaluate(self, *, state, questions, timeout_seconds=None):
+                    decision_calls.append({"state": state, "questions": questions})
+                    if next_decision["mode"] == "timeout":
+                        raise DecisionClientError("timeout")
+                    return next_decision["answers"], 120
+
+            class FakeKnowledge:
+                def query(self, question, *, clarification_context="", allow_clarify=True):
+                    if "打印机" in question:
+                        return Tier2Result(
+                            outcome="answered",
+                            reply_text="三楼自助打印黑白每页 0.2 元。",
+                            source_url="https://lib.stu.edu.cn/print",
+                            section_title="自助打印",
+                            is_long_formatted=False,
+                        )
+                    return Tier2Result(outcome="no_evidence", reply_text="")
+
+            responder = SupportResponder(
+                store=store,
+                preset_catalog=self.catalog,
+                decision_client=FakeDecisionClient(),
+                knowledge_responder=FakeKnowledge(),
+                case_relation_min_confidence=0.65,
+            )
+
+            def fake_send(to_user: str, content: str):
+                sent.append((to_user, content))
+                return {"ok": True, "errcode": 0, "errmsg": "ok", "duration_ms": 5}
+
+            pipeline = SupportPipeline(
+                store,
+                send_text_fn=fake_send,
+                auto_reply_enabled=True,
+                triage_fn=responder.triage,
+            )
+            pipeline.commit_handler = lambda outcome, plan: responder.apply_committed_plan(
+                outcome, plan, deliver_reply_fn=pipeline.deliver_reply
+            )
+            await pipeline.start()
+            try:
+                # Seed an active `replied` case for reader o_rel
+                case = store.create_staff_case(
+                    account_id="gh_lib",
+                    reader_id="o_rel",
+                    summary="静音舱怎么预约",
+                    latest_message="静音舱怎么预约？",
+                )
+                store.mark_staff_case_replied(
+                    case.case_id,
+                    "静音舱可以通过预约系统提前一天预约。",
+                    operator_username="lib_staff",
+                )
+
+                # 1) Layer 0 exact alias ("开馆时间") must NOT hijack old replied case or call SystemOne
+                res0, p0 = self._run_question(pipeline, "rel_0", "o_rel", "开馆时间")
+                await pipeline.process_ingest_side_effects(res0, p0)
+                await pipeline.wait_for_idle(timeout=2.0)
+                self.assertEqual(len(decision_calls), 0)
+                self.assertIn("8:00", sent[-1][1])
+                self.assertEqual(len(store.list_staff_cases(status="replied")), 1)
+
+                # 2) Layer 1 new_topic: unrelated short question within minutes goes to Tier 2, keeps old case untouched
+                next_decision["mode"] = "ok"
+                next_decision["answers"] = {
+                    "route": DecisionAnswer(choice="public_qa", confidence=0.92),
+                    "preset_id": DecisionAnswer(choice="none", confidence=0.95),
+                    "case_relation": DecisionAnswer(choice="new_topic", confidence=0.94),
+                }
+                res1, p1 = self._run_question(pipeline, "rel_1", "o_rel", "三楼打印机怎么收费")
+                await pipeline.process_ingest_side_effects(res1, p1)
+                await pipeline.wait_for_idle(timeout=2.0)
+                self.assertEqual(len(decision_calls), 1)
+                self.assertIn("active_staff_case", decision_calls[-1]["state"])
+                self.assertIn("case_relation", decision_calls[-1]["questions"])
+                self.assertIn("每页 0.2 元", sent[-1][1])
+                # Old silent-pod case remains replied and unpolluted
+                self.assertEqual(len(store.list_staff_cases(status="replied")), 1)
+                self.assertEqual(len(store.list_staff_cases(status="open")), 0)
+
+                # 3) Layer 1 same_case_followup: zero-overlap follow-up flips replied -> open & appends to SAME case
+                next_decision["answers"] = {
+                    "route": DecisionAnswer(choice="clarify", confidence=0.60),
+                    "preset_id": DecisionAnswer(choice="none", confidence=0.90),
+                    "case_relation": DecisionAnswer(choice="same_case_followup", confidence=0.88),
+                }
+                res2, p2 = self._run_question(pipeline, "rel_2", "o_rel", "那周末也能约吗？")
+                await pipeline.process_ingest_side_effects(res2, p2)
+                await pipeline.wait_for_idle(timeout=2.0)
+                self.assertEqual(sent[-1][1], REOPENED_CASE_FOLLOWUP_REPLY)
+                open_cases = store.list_staff_cases(status="open")
+                self.assertEqual(len(open_cases), 1)
+                self.assertEqual(open_cases[0]["case_id"], case.case_id)
+                self.assertEqual(open_cases[0]["messages"][-1]["content"], "那周末也能约吗？")
+
+                # Staff replies again -> replied
+                store.mark_staff_case_replied(
+                    case.case_id,
+                    "周末同样开放预约，规则一致。",
+                    operator_username="lib_staff",
+                )
+
+                # 4) Layer 1 same_case_ack: natural-language resolution closes replied case silently
+                sent_before_ack = len(sent)
+                next_decision["answers"] = {
+                    "route": DecisionAnswer(choice="unknown", confidence=0.80),
+                    "preset_id": DecisionAnswer(choice="none", confidence=0.95),
+                    "case_relation": DecisionAnswer(choice="same_case_ack", confidence=0.93),
+                }
+                res3, p3 = self._run_question(pipeline, "rel_3", "o_rel", "刚约上了，太棒了")
+                await pipeline.process_ingest_side_effects(res3, p3)
+                await pipeline.wait_for_idle(timeout=2.0)
+                self.assertEqual(len(sent), sent_before_ack)
+                closed_cases = store.list_staff_cases(status="closed")
+                self.assertEqual(len(closed_cases), 1)
+                self.assertEqual(closed_cases[0]["case_id"], case.case_id)
+                self.assertEqual(closed_cases[0]["closed_by"], "auto:reader_ack")
+
+                # 5) Layer 2 timeout fallback: blind time window is GONE (new short topic NOT hijacked),
+                #    while explicit follow-up marker STILL attaches cleanly.
+                case2 = store.create_staff_case(
+                    account_id="gh_lib",
+                    reader_id="o_rel_timeout",
+                    summary="静音舱刷卡打不开",
+                    latest_message="静音舱门禁刷卡打不开",
+                )
+                store.mark_staff_case_replied(
+                    case2.case_id,
+                    "请重新刷校园卡试一下。",
+                    operator_username="lib_staff",
+                )
+                next_decision["mode"] = "timeout"
+
+                # Unrelated short topic during timeout -> answered by Tier 2, NOT hijacked!
+                res4, p4 = self._run_question(pipeline, "rel_4", "o_rel_timeout", "三楼打印机怎么收费")
+                await pipeline.process_ingest_side_effects(res4, p4)
+                await pipeline.wait_for_idle(timeout=2.0)
+                self.assertIn("每页 0.2 元", sent[-1][1])
+                self.assertEqual(len(store.list_staff_cases(status="replied")), 1)
+
+                # Explicit follow-up marker during timeout -> attaches to case2 & flips replied -> open
+                res5, p5 = self._run_question(pipeline, "rel_5", "o_rel_timeout", "试过了还是不行")
+                await pipeline.process_ingest_side_effects(res5, p5)
+                await pipeline.wait_for_idle(timeout=2.0)
+                self.assertEqual(sent[-1][1], REOPENED_CASE_FOLLOWUP_REPLY)
+                open_after = store.list_staff_cases(status="open")
+                self.assertEqual(len(open_after), 1)
+                self.assertEqual(open_after[0]["case_id"], case2.case_id)
+            finally:
+                await pipeline.stop()
+                store.close()
+
+        asyncio.run(scenario())
+
 
 if __name__ == "__main__":
     unittest.main()
