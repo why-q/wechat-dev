@@ -95,6 +95,7 @@
 - `/dashboard/` 仅接受配置的 HTTPS origin，表单变更要求同源 `Origin`；Nginx 只对 Dashboard 路径重定向 HTTP，其他既有 HTTP 路由不变。响应禁止缓存且仅发送来源 origin，systemd 只读挂载共享 demo 样式。本次未配置生产凭据或重启服务。
 - 2026-11-27 域名切换：因 `llink.cyou` 即将到期，将自建服务域名由 `wechat-dev.llink.cyou` 切换为 `wechat-dev.997881.xyz`（路由与服务配置保持不变，同步更新 Nginx、`SUPPORT_DASHBOARD_PUBLIC_ORIGIN` 与文档；微信云托管控制台 `WECHAT_FORWARD_URL` 需同步更新）。
 - 2026-11-28 实时 Dashboard 图表、馆员工单结案与 7 天留存清理：微信云托管 `WECHAT_FORWARD_URL` 已同步切至 `wechat-dev.997881.xyz`；在 [db.py](support_backend/db.py)、[pipeline.py](support_backend/pipeline.py) 与 [relay_receiver.py](relay_receiver.py) 新增 UTC+8 运营聚合查询、FK 安全的 7 天过期入站事件自动清理（启动与周期调度 + `POST /relay/support/purge-expired`）；新增 [dashboard_charts.py](support_backend/dashboard_charts.py) 与 [dashboard_librarian.py](support_backend/dashboard_librarian.py)，将 Demo 紧凑布局、内联 SVG 图表与内联压缩 CSS 接入真实 `/dashboard/admin` 与 `/dashboard/librarian`，补齐紧急置顶横幅、待办工单队列、`POST /dashboard/librarian/cases/{case_id}/close` 备注结案闭环及意见反馈展示（馆员仍通过公众号后台回复读者，紧急出站告警因暂无渠道暂缓）。
+- 2026-11-28 第五步设计定稿（独立馆员权限 + 面板直连回复 + `1.` 模板 AI 双审热重载）：升级 `/dashboard/login` Session Cookie 登录与 SQLite 独立馆员账号细粒度 RBAC；开放全部工单（默认只看未结案，支持开关切换全部）及 48h 内私信流直连 `custom/send` 回复（实时展示 48h 窗口与 `x/5` 额度）；采用方案 A 将审核通过的 `1.*.md` 写入 `/var/lib/private/wechat-relay/presets/` 并热重载覆盖静态基线，发布前强制经确定性护栏 + 独立 AI 审核器拦截隐私/个案残留并智能识别同类并入。详见 [Step 5 方案](docs/STEP5-RBAC-REPLY-PRESETS-PLAN.md)。
 
 ## Reference
 
