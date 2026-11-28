@@ -336,6 +336,166 @@ class LibrarianWorkbenchTests(unittest.TestCase):
         self.assertIn("<div data-pace='3'></div>", html_out)
         self.assertIn("<div data-hbar='4'></div>", html_out)
 
+    def test_show_closed_toggle_and_closed_cases_direct_reply(self):
+        analytics = _sample_analytics()
+        analytics["closed_cases"] = [
+            {
+                "case_id": 401,
+                "case_kind": "staff_todo",
+                "status": "closed",
+                "summary": "已结案工单-借阅权限咨询",
+                "closed_at_utc8": "2026-11-28 15:40",
+                "closed_by": "zhangsan",
+                "resolution_note": "已电话回访并更新借阅权限",
+                "reader_id": "o_secret_closed_case_401",
+                "messages": [
+                    {"sender_role": "reader", "content": "我的借阅权限怎么受限了？", "created_hm": "15:20"},
+                    {
+                        "sender_role": "staff",
+                        "operator_username": "zhangsan",
+                        "content": "已为您恢复借阅权限。",
+                        "created_hm": "15:35",
+                    },
+                ],
+                "reply_quota": {
+                    "can_reply": True,
+                    "window_open": True,
+                    "window_remaining_seconds": 12 * 3600,
+                    "sent_in_window": 1,
+                    "quota_limit": 5,
+                    "blocked_reason": "",
+                },
+            }
+        ]
+
+        # Default show_closed=False hides closed_cases section
+        open_only = render_librarian_workbench(analytics, inbox_html="", show_closed=False)
+        self.assertIn('class="case-filter-toggle"', open_only)
+        self.assertIn('href="/dashboard/librarian" aria-current="true">仅看未结案</a>', open_only)
+        self.assertIn('href="/dashboard/librarian?show=all">显示全部工单（含已结）</a>', open_only)
+        self.assertNotIn("已结案工单-借阅权限咨询", open_only)
+        self.assertNotIn('action="/dashboard/librarian/cases/401/reply"', open_only)
+
+        # show_closed=True shows closed cases with direct reply form + draft-preset form
+        with_closed = render_librarian_workbench(
+            analytics,
+            inbox_html="",
+            active_view="cases",
+            show_closed=True,
+            can_reply=True,
+            can_close=True,
+            can_draft_preset=True,
+        )
+        self.assertIn('href="/dashboard/librarian?view=cases">仅看未结案</a>', with_closed)
+        self.assertIn('href="/dashboard/librarian?view=cases&show=all" aria-current="true">显示全部工单（含已结）</a>', with_closed)
+        self.assertIn("已结案工单-借阅权限咨询", with_closed)
+        self.assertIn('<span class="badge good">已结案</span>', with_closed)
+        self.assertIn("2026-11-28 15:40", with_closed)
+        self.assertIn("zhangsan", with_closed)
+        self.assertIn("馆员 (zhangsan) 15:35：", with_closed)
+        self.assertIn("可直复 · 剩 12h · 1/5", with_closed)
+        self.assertIn('action="/dashboard/librarian/cases/401/reply"', with_closed)
+        self.assertIn('action="/dashboard/librarian/cases/401/draft-preset"', with_closed)
+        self.assertIn("生成模板草稿", with_closed)
+        self.assertIn('<input type="hidden" name="show" value="all">', with_closed)
+        self.assertIn('name="save_preset_draft" value="yes"', with_closed)
+        # Closed case must NOT have a close form
+        self.assertNotIn('action="/dashboard/librarian/cases/401/close"', with_closed)
+        # Open cases DO have reply + reply_and_close
+        self.assertIn('action="/dashboard/librarian/cases/101/reply"', with_closed)
+        self.assertIn('action="/dashboard/librarian/cases/201/reply"', with_closed)
+        self.assertIn('value="reply_and_close"', with_closed)
+        self.assertNotIn("o_secret_", with_closed)
+
+    def test_permissions_hide_reply_close_and_draft_controls(self):
+        analytics = _sample_analytics()
+
+        no_reply = render_librarian_workbench(analytics, inbox_html="", can_reply=False, can_close=True)
+        self.assertNotIn('class="reply-form"', no_reply)
+        self.assertNotIn('action="/dashboard/librarian/cases/201/reply"', no_reply)
+        self.assertIn('action="/dashboard/librarian/cases/201/close"', no_reply)
+
+        no_close = render_librarian_workbench(analytics, inbox_html="", can_reply=True, can_close=False)
+        self.assertIn('action="/dashboard/librarian/cases/201/reply"', no_close)
+        self.assertNotIn('action="/dashboard/librarian/cases/201/close"', no_close)
+        self.assertNotIn('value="reply_and_close"', no_close)
+        self.assertNotIn("标记结案", no_close)
+
+        no_draft = render_librarian_workbench(analytics, inbox_html="", can_reply=True, can_draft_preset=False)
+        self.assertNotIn('name="save_preset_draft"', no_draft)
+
+    def test_blocked_quota_and_error_notice_and_xss_in_new_fields(self):
+        xss = '<script>alert("x")</script><img src=x onerror=alert(2)>'
+        analytics = _sample_analytics()
+        analytics["open_todo"][0]["reply_quota"] = {
+            "can_reply": False,
+            "window_open": False,
+            "window_remaining_seconds": 0,
+            "sent_in_window": 2,
+            "quota_limit": 5,
+            "blocked_reason": "window_expired",
+        }
+        analytics["open_todo"][1]["reply_quota"] = {
+            "can_reply": False,
+            "window_open": True,
+            "window_remaining_seconds": 1800,
+            "sent_in_window": 5,
+            "quota_limit": 5,
+            "blocked_reason": "quota_exhausted",
+        }
+        analytics["closed_cases"] = [
+            {
+                "case_id": 499,
+                "status": "closed",
+                "summary": xss,
+                "closed_at_utc8": xss,
+                "closed_by": xss,
+                "resolution_note": xss,
+                "reader_id": "o_secret_xss_499",
+                "messages": [
+                    {
+                        "sender_role": "staff",
+                        "operator_username": xss,
+                        "content": xss,
+                        "created_hm": "16:00",
+                    }
+                ],
+                "reply_quota": {
+                    "can_reply": True,
+                    "window_open": True,
+                    "window_remaining_seconds": 900,
+                    "sent_in_window": 0,
+                    "quota_limit": 5,
+                    "blocked_reason": "",
+                },
+            }
+        ]
+
+        html_out = render_librarian_workbench(
+            analytics,
+            inbox_html="",
+            notice=f"发送失败：{xss}",
+            notice_kind="error",
+            show_closed=True,
+            can_reply=True,
+            can_draft_preset=True,
+        )
+        self.assertIn('class="form-notice form-notice--error"', html_out)
+        self.assertIn("超48h窗口 · 2/5", html_out)
+        self.assertIn("额度已满 · 5/5", html_out)
+        self.assertIn("已超 48 小时回复窗口或已达 5 条额度，请前往微信公众号后台回复。", html_out)
+        self.assertNotIn('action="/dashboard/librarian/cases/201/reply"', html_out)
+        self.assertNotIn('action="/dashboard/librarian/cases/202/reply"', html_out)
+        # Case 203 has no reply_quota -> graceful fallback allows form
+        self.assertIn('action="/dashboard/librarian/cases/203/reply"', html_out)
+        # Case 499 has 900s = 15m remaining
+        self.assertIn("可直复 · 剩 15m · 0/5", html_out)
+        self.assertNotIn("o_secret_", html_out)
+        self.assertNotIn("<script>", html_out)
+        self.assertNotIn("<img ", html_out)
+        self.assertIn("&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt;", html_out)
+        self.assertIsNone(re.search(r"<[^>]*\bon[a-z]+\s*=", html_out, re.IGNORECASE))
+
 
 if __name__ == "__main__":
     unittest.main()

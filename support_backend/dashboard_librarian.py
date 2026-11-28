@@ -321,18 +321,28 @@ def _default_hbar(
     return f'{stack_html}<ol class="hbar-list"{aria_attr}>{"".join(rows)}</ol>'
 
 
+def _librarian_url(*, view: str = "all", show_closed: bool = False) -> str:
+    params: list[str] = []
+    if view in _VALID_VIEWS and view != "all":
+        params.append(f"view={view}")
+    if show_closed:
+        params.append("show=all")
+    return f"/dashboard/librarian?{'&'.join(params)}" if params else "/dashboard/librarian"
+
+
 def _render_view_tabs(
     *,
     active_view: str,
     open_total: int,
     feedback_count: int,
     inbox_count: int | None,
+    show_closed: bool = False,
 ) -> str:
     tabs: list[tuple[str, str, str, int | None]] = [
-        ("all", "/dashboard/librarian", "全部视图", None),
-        ("cases", "/dashboard/librarian?view=cases", "待办工单", open_total),
-        ("inbox", "/dashboard/librarian?view=inbox", "读者私信", inbox_count),
-        ("feedback", "/dashboard/librarian?view=feedback", "意见反馈", feedback_count),
+        ("all", _librarian_url(view="all", show_closed=show_closed), "全部视图", None),
+        ("cases", _librarian_url(view="cases", show_closed=show_closed), "待办工单", open_total),
+        ("inbox", _librarian_url(view="inbox", show_closed=show_closed), "读者私信", inbox_count),
+        ("feedback", _librarian_url(view="feedback", show_closed=show_closed), "意见反馈", feedback_count),
     ]
     links: list[str] = []
     for key, href, label, count in tabs:
@@ -340,6 +350,60 @@ def _render_view_tabs(
         count_html = f' <span class="view-tab-count">{count}</span>' if count is not None else ""
         links.append(f'<a href="{href}"{current}>{_esc(label)}{count_html}</a>')
     return f'<nav class="view-tabs" aria-label="视图筛选">{"".join(links)}</nav>'
+
+
+def _render_case_filter_toggle(*, active_view: str, show_closed: bool) -> str:
+    open_href = _librarian_url(view=active_view, show_closed=False)
+    all_href = _librarian_url(view=active_view, show_closed=True)
+    open_curr = ' aria-current="true"' if not show_closed else ""
+    all_curr = ' aria-current="true"' if show_closed else ""
+    return (
+        '<div class="case-filter-toggle" role="group" aria-label="工单范围筛选">'
+        f'<a href="{open_href}"{open_curr}>仅看未结案</a>'
+        f'<a href="{all_href}"{all_curr}>显示全部工单（含已结）</a>'
+        "</div>"
+    )
+
+
+def _render_quota_badge(quota: Mapping[str, Any] | None) -> str:
+    if not isinstance(quota, Mapping) or not quota:
+        return ""
+    can_reply = bool(quota.get("can_reply", True))
+    window_open = bool(quota.get("window_open", can_reply))
+    rem_sec = max(0, _int(quota.get("window_remaining_seconds"), default=0))
+    sent = max(0, _int(quota.get("sent_in_window"), default=0))
+    limit = max(1, _int(quota.get("quota_limit"), default=5))
+    blocked_reason = str(quota.get("blocked_reason") or "").strip().lower()
+
+    if can_reply:
+        if rem_sec >= 3600:
+            rem_text = f"剩 {rem_sec // 3600}h"
+        elif rem_sec > 0:
+            rem_text = f"剩 {max(1, (rem_sec + 59) // 60)}m"
+        else:
+            rem_text = ""
+        detail = f"可直复 · {rem_text} · {sent}/{limit}" if rem_text else f"可直复 · {sent}/{limit}"
+        return f'<span class="badge good quota-badge">{_esc(detail)}</span>'
+
+    if blocked_reason == "quota_exhausted" or (window_open and sent >= limit):
+        return f'<span class="badge urgent quota-badge">{_esc(f"额度已满 · {sent}/{limit}")}</span>'
+    if blocked_reason == "no_inbound":
+        return f'<span class="badge muted quota-badge">{_esc(f"无交互记录 · {sent}/{limit}")}</span>'
+    return f'<span class="badge muted quota-badge">{_esc(f"超48h窗口 · {sent}/{limit}")}</span>'
+
+
+def _has_staff_reply_or_note(case: Mapping[str, Any]) -> bool:
+    if str(case.get("resolution_note") or "").strip():
+        return True
+    raw_messages = case.get("messages")
+    if isinstance(raw_messages, Sequence) and not isinstance(raw_messages, (str, bytes)):
+        for msg in raw_messages:
+            if not isinstance(msg, Mapping):
+                continue
+            role = str(msg.get("sender_role") or "").strip().lower()
+            if role in {"staff", "librarian", "admin"} and str(msg.get("content") or "").strip():
+                return True
+    return False
 
 
 def _render_case_thread(case: Mapping[str, Any]) -> str:
@@ -351,6 +415,9 @@ def _render_case_thread(case: Mapping[str, Any]) -> str:
             continue
         role_raw = str(msg.get("sender_role") or "reader").strip().lower()
         role_label = _SENDER_ROLE_LABELS.get(role_raw, role_raw or "读者")
+        operator = str(msg.get("operator_username") or "").strip()
+        if role_raw in {"staff", "librarian", "admin"} and operator:
+            role_label = f"{role_label} ({operator})"
         hm = _extract_hm(msg.get("created_hm") or msg.get("created_at_utc8"))
         content = str(msg.get("content") or "").strip()
         if not content:
@@ -369,16 +436,84 @@ def _render_case_thread(case: Mapping[str, Any]) -> str:
     return "".join(lines)
 
 
-def _render_close_form(case_id: object, *, active_view: str) -> str:
+def _render_reply_form(
+    case: Mapping[str, Any],
+    *,
+    active_view: str,
+    show_closed: bool,
+    can_reply: bool,
+    can_close: bool,
+    can_draft_preset: bool,
+) -> str:
+    if not can_reply:
+        return ""
+    raw_quota = case.get("reply_quota")
+    quota = raw_quota if isinstance(raw_quota, Mapping) else None
+    badge_html = _render_quota_badge(quota)
+    badge_wrap = f'<div class="reply-quota-row">{badge_html}</div>' if badge_html else ""
+
+    quota_eligible = bool(quota.get("can_reply", True)) if quota else True
+    if not quota_eligible:
+        return (
+            f"{badge_wrap}"
+            '<p class="panel-note">已超 48 小时回复窗口或已达 5 条额度，请前往微信公众号后台回复。</p>'
+        )
+
+    safe_id = _safe_case_id(case.get("case_id", ""))
+    show_val = "all" if show_closed else "open"
+    is_open = str(case.get("status") or "open").strip().lower() == "open"
+    draft_html = (
+        '<label class="confirm-label"><input type="checkbox" name="save_preset_draft" value="yes"> '
+        "同时生成 1. 标准模板草稿</label>"
+        if can_draft_preset
+        else ""
+    )
+    reply_and_close_html = (
+        '<button class="button button--quiet button--xs" type="submit" name="action" value="reply_and_close">'
+        "发送并结案</button>"
+        if (can_close and is_open)
+        else ""
+    )
+    return (
+        f"{badge_wrap}"
+        f'<form class="reply-form" method="post" action="/dashboard/librarian/cases/{safe_id}/reply">'
+        f'<input type="hidden" name="view" value="{_esc(active_view)}">'
+        f'<input type="hidden" name="show" value="{show_val}">'
+        '<textarea class="form-control reply-textarea" name="reply_text" rows="2" maxlength="900" '
+        'required placeholder="输入直接发送给读者的微信回复（≤1800字节）"></textarea>'
+        '<div class="reply-form-actions">'
+        f"{draft_html}"
+        '<button class="button button--xs" type="submit" name="action" value="reply">发送回复</button>'
+        f"{reply_and_close_html}"
+        "</div>"
+        "</form>"
+    )
+
+
+def _render_close_form(case_id: object, *, active_view: str, show_closed: bool = False) -> str:
     safe_id = _safe_case_id(case_id)
+    show_val = "all" if show_closed else "open"
     return (
         f'<form class="case-close-form" method="post" action="/dashboard/librarian/cases/{safe_id}/close">'
         f'<input type="hidden" name="view" value="{_esc(active_view)}">'
+        f'<input type="hidden" name="show" value="{show_val}">'
         '<input type="text" name="resolution_note" class="form-control" maxlength="500" '
         'placeholder="填写处理结果或备注（选填）">'
         '<label class="confirm-label"><input type="checkbox" name="confirm" value="yes" required> '
         "确认已在公众号后台回复/处置</label>"
         '<button class="button button--quiet" type="submit">标记结案</button>'
+        "</form>"
+    )
+
+
+def _render_draft_preset_form(case_id: object, *, active_view: str, show_closed: bool = True) -> str:
+    safe_id = _safe_case_id(case_id)
+    show_val = "all" if show_closed else "open"
+    return (
+        f'<form class="draft-preset-form" method="post" action="/dashboard/librarian/cases/{safe_id}/draft-preset">'
+        f'<input type="hidden" name="view" value="{_esc(active_view)}">'
+        f'<input type="hidden" name="show" value="{show_val}">'
+        '<button class="button button--quiet button--xs" type="submit">生成模板草稿</button>'
         "</form>"
     )
 
@@ -504,12 +639,27 @@ def _render_metric_strip(
     )
 
 
+def _details_summary_label(*, can_reply: bool, can_close: bool, is_open: bool) -> str:
+    if can_reply and can_close and is_open:
+        return "展开留言与回复"
+    if can_reply:
+        return "展开留言与回复"
+    if can_close and is_open:
+        return "展开留言与结案"
+    return "展开留言详情"
+
+
 def _render_emergency_banners(
     open_emergency: Sequence[Mapping[str, Any]],
     *,
     active_view: str,
+    show_closed: bool = False,
+    can_reply: bool = True,
+    can_close: bool = True,
+    can_draft_preset: bool = False,
 ) -> str:
     banners: list[str] = []
+    details_label = _details_summary_label(can_reply=can_reply, can_close=can_close, is_open=True)
     for idx, case in enumerate(open_emergency):
         summary = _truncate(str(case.get("summary") or case.get("latest_message") or "紧急事项"), limit=60)
         created_hm = _extract_hm(case.get("created_hm") or case.get("created_at_utc8"))
@@ -520,7 +670,19 @@ def _render_emergency_banners(
         desc_parts.append(f"已等待 {wait_min} 分")
         heading_id = f"priority-title-{idx + 1}" if idx > 0 else "priority-title"
         thread_html = _render_case_thread(case)
-        form_html = _render_close_form(case.get("case_id", ""), active_view=active_view)
+        reply_html = _render_reply_form(
+            case,
+            active_view=active_view,
+            show_closed=show_closed,
+            can_reply=can_reply,
+            can_close=can_close,
+            can_draft_preset=can_draft_preset,
+        )
+        close_html = (
+            _render_close_form(case.get("case_id", ""), active_view=active_view, show_closed=show_closed)
+            if can_close
+            else ""
+        )
         banners.append(
             f'<section class="urgent-banner" aria-labelledby="{heading_id}">'
             '<div class="urgent-banner-main">'
@@ -531,35 +693,131 @@ def _render_emergency_banners(
             "</div>"
             '<div class="urgent-banner-meta"><span>已发紧急联系方式</span></div>'
             '<details class="queue-details">'
-            "<summary>展开留言与结案</summary>"
-            f"{thread_html}{form_html}"
+            f"<summary>{details_label}</summary>"
+            f"{thread_html}{reply_html}{close_html}"
             "</details>"
             "</section>"
         )
     return "".join(banners)
 
 
+def _render_closed_cases_section(
+    closed_cases: Sequence[Mapping[str, Any]],
+    *,
+    active_view: str,
+    can_reply: bool,
+    can_draft_preset: bool,
+) -> str:
+    count = len(closed_cases)
+    section_head = (
+        '<div class="subsection-title closed-cases-head">'
+        "<h3>已结案工单</h3>"
+        f"<span>{count} 条</span>"
+        "</div>"
+    )
+    if not closed_cases:
+        return (
+            '<div class="closed-cases-section">'
+            f"{section_head}"
+            '<p class="panel-note">暂无已结案工单。</p>'
+            "</div>"
+        )
+
+    details_label = _details_summary_label(can_reply=can_reply, can_close=False, is_open=False)
+    rows: list[str] = []
+    for case in closed_cases:
+        summary = _truncate(str(case.get("summary") or case.get("latest_message") or "已结工单"), limit=48)
+        closed_at = str(case.get("closed_at_utc8") or case.get("closed_hm") or "").strip()
+        closed_by = str(case.get("closed_by") or "").strip()
+        resolution_note = str(case.get("resolution_note") or "").strip()
+
+        meta_parts: list[str] = []
+        if closed_at:
+            meta_parts.append(f"结案于 {closed_at}")
+        if closed_by:
+            meta_parts.append(f"经办 {closed_by}")
+        meta_html = f'<p class="case-meta"><span>{_esc(" · ".join(meta_parts))}</span></p>' if meta_parts else ""
+        note_html = f'<p class="case-meta"><span>备注：{_esc(resolution_note)}</span></p>' if resolution_note else ""
+
+        closed_case_payload = dict(case)
+        closed_case_payload["status"] = "closed"
+        thread_html = _render_case_thread(closed_case_payload)
+        reply_html = _render_reply_form(
+            closed_case_payload,
+            active_view=active_view,
+            show_closed=True,
+            can_reply=can_reply,
+            can_close=False,
+            can_draft_preset=can_draft_preset,
+        )
+        draft_form_html = (
+            _render_draft_preset_form(case.get("case_id", ""), active_view=active_view, show_closed=True)
+            if (can_draft_preset and _has_staff_reply_or_note(closed_case_payload))
+            else ""
+        )
+        rows.append(
+            '<li class="queue-row queue-row--closed">'
+            '<div class="queue-title-line">'
+            '<span class="badge good">已结案</span>'
+            f"<h3>{_esc(summary)}</h3>"
+            "</div>"
+            f"{meta_html}"
+            f"{note_html}"
+            '<details class="queue-details">'
+            f"<summary>{details_label}</summary>"
+            f"{thread_html}{reply_html}{draft_form_html}"
+            "</details>"
+            "</li>"
+        )
+    return (
+        '<div class="closed-cases-section">'
+        f'{section_head}<ol class="queue-list closed-cases-list">{"".join(rows)}</ol>'
+        "</div>"
+    )
+
+
 def _render_open_todo_panel(
     open_todo: Sequence[Mapping[str, Any]],
     *,
     active_view: str,
+    show_closed: bool = False,
+    closed_cases: Sequence[Mapping[str, Any]] = (),
+    can_reply: bool = True,
+    can_close: bool = True,
+    can_draft_preset: bool = False,
 ) -> str:
     count = len(open_todo)
+    toggle_html = _render_case_filter_toggle(active_view=active_view, show_closed=show_closed)
     header = (
         '<div class="panel-head">'
         '<h2 id="queue-title">普通未结案队列</h2>'
+        '<div class="panel-head-actions">'
+        f"{toggle_html}"
         f'<span class="period-chip">按等待时长降序 · {count} 条</span>'
         "</div>"
+        "</div>"
+    )
+    closed_html = (
+        _render_closed_cases_section(
+            closed_cases,
+            active_view=active_view,
+            can_reply=can_reply,
+            can_draft_preset=can_draft_preset,
+        )
+        if show_closed
+        else ""
     )
     if not open_todo:
         return (
             '<section class="panel panel--span-8 panel--queue-main" aria-labelledby="queue-title">'
             f"{header}"
             '<p class="panel-note">当前没有未结普通待办。</p>'
+            f"{closed_html}"
             "</section>"
         )
 
     max_wait = max((max(0, _int(case.get("wait_minutes"))) for case in open_todo), default=0)
+    details_label = _details_summary_label(can_reply=can_reply, can_close=can_close, is_open=True)
     rows: list[str] = []
     for case in open_todo:
         summary = _truncate(str(case.get("summary") or case.get("latest_message") or "未命名待办"), limit=48)
@@ -588,7 +846,19 @@ def _render_open_todo_panel(
 
         time_html = f'<span class="queue-time">{_esc(created_hm)}</span>' if created_hm else ""
         thread_html = _render_case_thread(case)
-        form_html = _render_close_form(case.get("case_id", ""), active_view=active_view)
+        reply_html = _render_reply_form(
+            case,
+            active_view=active_view,
+            show_closed=show_closed,
+            can_reply=can_reply,
+            can_close=can_close,
+            can_draft_preset=can_draft_preset,
+        )
+        close_html = (
+            _render_close_form(case.get("case_id", ""), active_view=active_view, show_closed=show_closed)
+            if can_close
+            else ""
+        )
         rows.append(
             '<li class="queue-row">'
             '<div class="queue-title-line">'
@@ -602,15 +872,15 @@ def _render_open_todo_panel(
             "</div>"
             f"{priority_badge}"
             '<details class="queue-details">'
-            "<summary>展开留言与结案</summary>"
-            f"{thread_html}{form_html}"
+            f"<summary>{details_label}</summary>"
+            f"{thread_html}{reply_html}{close_html}"
             "</details>"
             "</li>"
         )
 
     return (
         '<section class="panel panel--span-8 panel--queue-main" aria-labelledby="queue-title">'
-        f'{header}<ol class="queue-list">{"".join(rows)}</ol>'
+        f'{header}<ol class="queue-list">{"".join(rows)}</ol>{closed_html}'
         "</section>"
     )
 
@@ -810,6 +1080,11 @@ def render_librarian_workbench(
     inbox_html: str,
     active_view: str = "all",
     notice: str = "",
+    notice_kind: str = "info",
+    show_closed: bool = False,
+    can_reply: bool = True,
+    can_close: bool = True,
+    can_draft_preset: bool = False,
     render_sparkline_fn: Callable[[Sequence[int | float]], str] | None = None,
     render_donut_fn: Callable[..., str] | None = None,
     render_pace_fn: Callable[[Sequence[Mapping[str, Any]]], str] | None = None,
@@ -838,6 +1113,12 @@ def render_librarian_workbench(
     open_todo = (
         [item for item in raw_todo if isinstance(item, Mapping)]
         if isinstance(raw_todo, Sequence) and not isinstance(raw_todo, (str, bytes))
+        else []
+    )
+    raw_closed_cases = data.get("closed_cases")
+    closed_cases = (
+        [item for item in raw_closed_cases if isinstance(item, Mapping)]
+        if isinstance(raw_closed_cases, Sequence) and not isinstance(raw_closed_cases, (str, bytes))
         else []
     )
 
@@ -891,12 +1172,16 @@ def render_librarian_workbench(
             open_total=open_total,
             feedback_count=len(recent_feedbacks),
             inbox_count=inbox_count,
+            show_closed=show_closed,
         )
     ]
 
     clean_notice = str(notice or "").strip()
     if clean_notice:
-        parts.append(f'<p class="form-notice" role="status">{_esc(clean_notice)}</p>')
+        if str(notice_kind or "info").strip().lower() == "error":
+            parts.append(f'<p class="form-notice form-notice--error" role="alert">{_esc(clean_notice)}</p>')
+        else:
+            parts.append(f'<p class="form-notice" role="status">{_esc(clean_notice)}</p>')
 
     parts.append(
         _render_metric_strip(
@@ -916,11 +1201,30 @@ def render_librarian_workbench(
     show_inbox = view in ("all", "inbox")
 
     if show_cases and open_emergency:
-        parts.append(_render_emergency_banners(open_emergency, active_view=view))
+        parts.append(
+            _render_emergency_banners(
+                open_emergency,
+                active_view=view,
+                show_closed=show_closed,
+                can_reply=can_reply,
+                can_close=can_close,
+                can_draft_preset=can_draft_preset,
+            )
+        )
 
     grid_parts: list[str] = []
     if show_cases:
-        grid_parts.append(_render_open_todo_panel(open_todo, active_view=view))
+        grid_parts.append(
+            _render_open_todo_panel(
+                open_todo,
+                active_view=view,
+                show_closed=show_closed,
+                closed_cases=closed_cases,
+                can_reply=can_reply,
+                can_close=can_close,
+                can_draft_preset=can_draft_preset,
+            )
+        )
         grid_parts.append(
             _render_right_stack(
                 open_total=open_total,

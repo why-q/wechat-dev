@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -78,6 +79,128 @@ class InboxProjectionTests(unittest.TestCase):
                 self.assertNotIn(keyword, rendered)
                 self.assertIn("&lt;b&gt;markup &amp; text&lt;/b&gt;", rendered)
                 self.assertNotIn("<b>markup & text</b>", rendered)
+            finally:
+                store.close()
+
+    def test_can_reply_shows_eligible_form_staff_log_and_preset_checkbox(self):
+        now = [1_800_000_000.0]
+        with tempfile.TemporaryDirectory() as temp:
+            store = SupportStore(Path(temp) / "reply_inbox.db", clock=lambda: now[0])
+            try:
+                secret_reader = "o_secret_inbox_reader_42"
+                payload = {
+                    "transport": "cloud",
+                    "msg_type": "text",
+                    "event": "",
+                    "msg_id": "reply-1",
+                    "from_user": secret_reader,
+                    "to_user": "library",
+                    "content": "请问开馆时间是几点？",
+                    "create_time": "1800000000",
+                }
+                res = store.ingest_event(
+                    payload,
+                    classify_message(msg_type="text", content=payload["content"]),
+                    client_ip="",
+                )
+                store.record_outbound_reply(
+                    account_id="library",
+                    reader_id=secret_reader,
+                    trigger_kind="staff_dashboard_reply",
+                    trigger_ref_id=res.seq,
+                    content="每天 8:00-22:00 开放。<script>alert(1)</script>",
+                    delivery_mode="live",
+                    status="sent",
+                    operator_username="alice<b>",
+                    now_epoch=now[0] + 60,
+                )
+                now[0] += 3600  # 1 hour elapsed -> 47h left, 1/5 sent
+
+                rendered = render_inbox(
+                    store,
+                    can_reply=True,
+                    can_draft_preset=True,
+                    active_view="inbox",
+                    show_closed=True,
+                )
+                self.assertIn('class="case-row case-row--compact"', rendered)
+                self.assertIn('class="inbox-reply-log"', rendered)
+                self.assertIn("已回复（alice&lt;b&gt;", rendered)
+                self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", rendered)
+                self.assertIn("回复（剩47h·1/5）", rendered)
+                self.assertIn(f'action="/dashboard/librarian/inbox/{res.seq}/reply"', rendered)
+                self.assertIn('<input type="hidden" name="view" value="inbox">', rendered)
+                self.assertIn('<input type="hidden" name="show" value="all">', rendered)
+                self.assertIn('name="reply_text"', rendered)
+                self.assertIn('name="save_preset_draft" value="yes"', rendered)
+                self.assertIn("发送微信回复", rendered)
+                self.assertNotIn("文本消息", rendered)
+                self.assertNotIn(secret_reader, rendered)
+                self.assertNotIn("<script>", rendered)
+                self.assertIsNone(re.search(r"\bon[a-z]+\s*=", rendered, re.IGNORECASE))
+
+                no_draft = render_inbox(store, can_reply=True, can_draft_preset=False)
+                self.assertNotIn('name="save_preset_draft"', no_draft)
+                self.assertIn('<input type="hidden" name="show" value="open">', no_draft)
+            finally:
+                store.close()
+
+    def test_can_reply_blocks_expired_window_and_exhausted_quota(self):
+        now = [1_800_000_000.0]
+        with tempfile.TemporaryDirectory() as temp:
+            store = SupportStore(Path(temp) / "blocked_inbox.db", clock=lambda: now[0])
+            try:
+                # Reader A: older than 48h
+                res_old = store.ingest_event(
+                    {
+                        "transport": "cloud",
+                        "msg_type": "text",
+                        "event": "",
+                        "msg_id": "old-1",
+                        "from_user": "o_secret_old_reader",
+                        "to_user": "library",
+                        "content": "两天前的留言",
+                        "create_time": "1800000000",
+                    },
+                    classify_message(msg_type="text", content="两天前的留言"),
+                    client_ip="",
+                )
+                now[0] += 49 * 3600  # 49h later -> Reader A expired
+                # Reader B: fresh message but 5 sent replies -> quota exhausted
+                res_full = store.ingest_event(
+                    {
+                        "transport": "cloud",
+                        "msg_type": "text",
+                        "event": "",
+                        "msg_id": "full-1",
+                        "from_user": "o_secret_full_reader",
+                        "to_user": "library",
+                        "content": "刚刚的留言",
+                        "create_time": str(int(now[0])),
+                    },
+                    classify_message(msg_type="text", content="刚刚的留言"),
+                    client_ip="",
+                )
+                for idx in range(5):
+                    store.record_outbound_reply(
+                        account_id="library",
+                        reader_id="o_secret_full_reader",
+                        trigger_kind="staff_dashboard_reply",
+                        trigger_ref_id=res_full.seq,
+                        content=f"回复 #{idx + 1}",
+                        delivery_mode="live",
+                        status="sent",
+                        operator_username="bob",
+                        now_epoch=now[0] + idx + 1,
+                    )
+
+                rendered = render_inbox(store, can_reply=True)
+                self.assertIn('<span class="inbox-quota-blocked">超48h</span>', rendered)
+                self.assertIn('<span class="inbox-quota-blocked">额度满</span>', rendered)
+                self.assertIn("已超 48 小时回复窗口或已达 5 条上限，请前往微信公众号后台回复。", rendered)
+                self.assertNotIn(f'action="/dashboard/librarian/inbox/{res_old.seq}/reply"', rendered)
+                self.assertNotIn(f'action="/dashboard/librarian/inbox/{res_full.seq}/reply"', rendered)
+                self.assertNotIn("o_secret_", rendered)
             finally:
                 store.close()
 
