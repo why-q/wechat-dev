@@ -1,11 +1,30 @@
 """Self-hosted backend package for library WeChat support pipeline."""
 
+from .auth import (
+    ALL_LIBRARIAN_PERMISSIONS,
+    DEFAULT_LIBRARIAN_PERMISSIONS,
+    PERM_CLOSE_CASE,
+    PERM_DRAFT_PRESET,
+    PERM_REPLY_READER,
+    PERM_REVIEW_PRESET,
+    PERM_VIEW_WORKBENCH,
+    PERMISSION_LABELS,
+    DashboardPrincipal,
+    generate_session_token,
+    hash_password,
+    hash_session_token,
+    normalize_permissions,
+    valid_username,
+    verify_password,
+)
 from .db import (
     DEFAULT_CLARIFICATION_TTL_SECONDS,
     DEFAULT_MAX_PREEMPTS,
     DEFAULT_MAX_WAIT_SECONDS,
     DEFAULT_MERGE_ENABLED,
     DEFAULT_QUIET_SECONDS,
+    WECHAT_INTERACTION_QUOTA_LIMIT,
+    WECHAT_INTERACTION_WINDOW_SECONDS,
     SupportStore,
 )
 from .schema import (
@@ -74,6 +93,7 @@ from .responder import (
 )
 
 __all__ = [
+    "ALL_LIBRARIAN_PERMISSIONS",
     "BatchSnapshot",
     "ClarificationSnapshot",
     "DEFAULT_CLARIFICATION_TTL_SECONDS",
@@ -81,6 +101,7 @@ __all__ = [
     "DEFAULT_DECISION_MODEL",
     "DEFAULT_DECISION_TIMEOUT_SECONDS",
     "DEFAULT_GRAY_ENROLL_KEYWORD",
+    "DEFAULT_LIBRARIAN_PERMISSIONS",
     "DEFAULT_LONG_ANSWER_CHARS",
     "DEFAULT_MAX_PREEMPTS",
     "DEFAULT_MAX_WAIT_SECONDS",
@@ -89,6 +110,7 @@ __all__ = [
     "DEFAULT_PRESET_MIN_CONFIDENCE",
     "DEFAULT_QUIET_SECONDS",
     "DEFAULT_TOP_K",
+    "DashboardPrincipal",
     "DecisionAnswer",
     "DecisionClientError",
     "EMERGENCY_CONTACT_REPLY",
@@ -101,6 +123,12 @@ __all__ = [
     "IngestResult",
     "KnowledgeError",
     "OpenAICompatiblePresetLLM",
+    "PERMISSION_LABELS",
+    "PERM_CLOSE_CASE",
+    "PERM_DRAFT_PRESET",
+    "PERM_REPLY_READER",
+    "PERM_REVIEW_PRESET",
+    "PERM_VIEW_WORKBENCH",
     "PresetAuditResult",
     "PresetCatalog",
     "PresetDocument",
@@ -114,6 +142,8 @@ __all__ = [
     "Tier2KnowledgeResponder",
     "Tier2Result",
     "TriagePlan",
+    "WECHAT_INTERACTION_QUOTA_LIMIT",
+    "WECHAT_INTERACTION_WINDOW_SECONDS",
     "audit_preset_for_publish",
     "build_chunks_from_corpus",
     "build_systemone_url",
@@ -125,9 +155,15 @@ __all__ = [
     "export_dynamic_presets",
     "format_grounded_answer",
     "generate_preset_proposal",
+    "generate_session_token",
+    "hash_password",
+    "hash_session_token",
     "normalize_alias_text",
+    "normalize_permissions",
     "render_preset_markdown",
     "safe_preset_filename",
     "split_frontmatter",
+    "valid_username",
+    "verify_password",
     "write_dynamic_preset",
 ]

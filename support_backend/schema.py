@@ -9,7 +9,7 @@ from typing import Any
 
 from .filters import FilterDecision, default_same_case_matcher
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utc_iso(epoch_seconds: float) -> str:
@@ -62,6 +62,7 @@ class StaffCaseSnapshot:
     updated_at_epoch: float
     closed_at_utc: str | None = None
     resolution_note: str = ""
+    closed_by: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -77,6 +78,7 @@ class StaffCaseSnapshot:
             "updated_at_epoch": self.updated_at_epoch,
             "closed_at_utc": self.closed_at_utc,
             "resolution_note": self.resolution_note,
+            "closed_by": self.closed_by,
         }
 
 
@@ -228,7 +230,8 @@ CREATE TABLE IF NOT EXISTS staff_cases (
     updated_at_epoch REAL NOT NULL,
     updated_at_utc TEXT NOT NULL,
     closed_at_utc TEXT,
-    resolution_note TEXT NOT NULL DEFAULT ''
+    resolution_note TEXT NOT NULL DEFAULT '',
+    closed_by TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_staff_cases_open_reader
@@ -305,6 +308,7 @@ CREATE TABLE IF NOT EXISTS staff_case_messages (
     event_seq INTEGER REFERENCES inbound_events(seq),
     sender_role TEXT NOT NULL,
     content TEXT NOT NULL,
+    operator_username TEXT NOT NULL DEFAULT '',
     created_at_epoch REAL NOT NULL,
     created_at_utc TEXT NOT NULL
 );
@@ -321,9 +325,16 @@ CREATE TABLE IF NOT EXISTS outbound_replies (
     errcode INTEGER,
     errmsg TEXT NOT NULL DEFAULT '',
     duration_ms INTEGER,
+    operator_username TEXT NOT NULL DEFAULT '',
     created_at_epoch REAL NOT NULL,
     created_at_utc TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_outbound_reader_time
+    ON outbound_replies(account_id, reader_id, created_at_epoch);
+
+CREATE INDEX IF NOT EXISTS idx_outbound_trigger
+    ON outbound_replies(trigger_kind, trigger_ref_id);
 
 CREATE TABLE IF NOT EXISTS clarification_states (
     clarify_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -375,4 +386,61 @@ CREATE TABLE IF NOT EXISTS auto_reply_allowlist (
     updated_at_utc TEXT NOT NULL,
     PRIMARY KEY (account_id, reader_id)
 );
+
+CREATE TABLE IF NOT EXISTS dashboard_users (
+    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    display_name TEXT NOT NULL DEFAULT '',
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'librarian',
+    permissions_json TEXT NOT NULL DEFAULT '[]',
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at_epoch REAL NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_epoch REAL NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    last_login_utc TEXT
+);
+
+CREATE TABLE IF NOT EXISTS dashboard_sessions (
+    token_hash TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at_epoch REAL NOT NULL,
+    expires_at_epoch REAL NOT NULL,
+    last_seen_epoch REAL NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dashboard_sessions_expires
+    ON dashboard_sessions(expires_at_epoch);
+
+CREATE TABLE IF NOT EXISTS preset_drafts (
+    draft_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_case_id INTEGER,
+    source_event_seq INTEGER,
+    source_question TEXT NOT NULL DEFAULT '',
+    staff_reply TEXT NOT NULL DEFAULT '',
+    mode TEXT NOT NULL DEFAULT 'create',
+    target_preset_id TEXT NOT NULL DEFAULT '',
+    preset_id TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    applicability TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    ai_generation_note TEXT NOT NULL DEFAULT '',
+    ai_review_status TEXT NOT NULL DEFAULT 'pending',
+    ai_review_reasons_json TEXT NOT NULL DEFAULT '[]',
+    ai_review_suggestion TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'draft',
+    created_by TEXT NOT NULL DEFAULT '',
+    reviewed_by TEXT NOT NULL DEFAULT '',
+    created_at_epoch REAL NOT NULL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_epoch REAL NOT NULL,
+    updated_at_utc TEXT NOT NULL,
+    published_at_utc TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_preset_drafts_status
+    ON preset_drafts(status, updated_at_epoch DESC);
 """

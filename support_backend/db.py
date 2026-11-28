@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from pathlib import Path
 import sqlite3
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, Sequence
 
+from .auth import (
+    ALL_LIBRARIAN_PERMISSIONS,
+    DEFAULT_LIBRARIAN_PERMISSIONS,
+    VALID_ROLES,
+    DashboardPrincipal,
+    generate_session_token,
+    hash_password,
+    hash_session_token,
+    normalize_permissions,
+    valid_username,
+    verify_password,
+)
 from .filters import FilterDecision
 from .schema import (
     SCHEMA_SQL as _SCHEMA_SQL,
@@ -32,6 +45,8 @@ DEFAULT_MERGE_ENABLED = False
 DEFAULT_MAX_PREEMPTS = 2
 DEFAULT_RETENTION_SECONDS = 7 * 24 * 3600
 DEFAULT_CLARIFICATION_TTL_SECONDS = 1800.0
+WECHAT_INTERACTION_WINDOW_SECONDS = 48 * 3600
+WECHAT_INTERACTION_QUOTA_LIMIT = 5
 
 _UTC8 = timezone(timedelta(hours=8))
 _WEEKDAY_ZH = ("一", "二", "三", "四", "五", "六", "日")
@@ -128,6 +143,18 @@ class SupportStore:
                 str(row["name"])
                 for row in self._conn.execute("PRAGMA table_info(merge_batches)").fetchall()
             }
+            staff_cases_cols = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(staff_cases)").fetchall()
+            }
+            case_msg_cols = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(staff_case_messages)").fetchall()
+            }
+            outbound_cols = {
+                str(row["name"])
+                for row in self._conn.execute("PRAGMA table_info(outbound_replies)").fetchall()
+            }
             with self._conn:
                 if "generation" not in existing_cols:
                     self._conn.execute(
@@ -140,6 +167,18 @@ class SupportStore:
                 if "preempt_locked" not in existing_cols:
                     self._conn.execute(
                         "ALTER TABLE merge_batches ADD COLUMN preempt_locked INTEGER NOT NULL DEFAULT 0"
+                    )
+                if "closed_by" not in staff_cases_cols:
+                    self._conn.execute(
+                        "ALTER TABLE staff_cases ADD COLUMN closed_by TEXT NOT NULL DEFAULT ''"
+                    )
+                if "operator_username" not in case_msg_cols:
+                    self._conn.execute(
+                        "ALTER TABLE staff_case_messages ADD COLUMN operator_username TEXT NOT NULL DEFAULT ''"
+                    )
+                if "operator_username" not in outbound_cols:
+                    self._conn.execute(
+                        "ALTER TABLE outbound_replies ADD COLUMN operator_username TEXT NOT NULL DEFAULT ''"
                     )
                 self._conn.execute("DROP INDEX IF EXISTS idx_merge_open_reader;")
                 self._conn.execute(
@@ -196,6 +235,8 @@ class SupportStore:
         )
 
     def _row_to_case(self, row: sqlite3.Row) -> StaffCaseSnapshot:
+        keys = row.keys()
+        closed_by = str(row["closed_by"]) if "closed_by" in keys and row["closed_by"] is not None else ""
         return StaffCaseSnapshot(
             case_id=int(row["case_id"]),
             account_id=str(row["account_id"]),
@@ -209,6 +250,7 @@ class SupportStore:
             updated_at_epoch=float(row["updated_at_epoch"]),
             closed_at_utc=row["closed_at_utc"],
             resolution_note=str(row["resolution_note"]),
+            closed_by=closed_by,
         )
 
     def ingest_event(
@@ -1219,12 +1261,15 @@ class SupportStore:
         case_id: int,
         *,
         resolution_note: str = "",
+        closed_by: str = "",
         now_epoch: float | None = None,
     ) -> StaffCaseSnapshot | None:
         """Mark a staff case resolved on the Dashboard so later questions take normal flow."""
         with self._lock:
             now_val = float(self._clock() if now_epoch is None else now_epoch)
             now_utc = _utc_iso(now_val)
+            clean_note = resolution_note.strip()
+            clean_operator = closed_by.strip()
             with self._conn:
                 cursor = self._conn.execute(
                     """
@@ -1233,19 +1278,20 @@ class SupportStore:
                         closed_at_utc = ?,
                         updated_at_epoch = ?,
                         updated_at_utc = ?,
-                        resolution_note = ?
+                        resolution_note = ?,
+                        closed_by = ?
                     WHERE case_id = ? AND status = 'open'
                     """,
-                    (now_utc, now_val, now_utc, resolution_note.strip(), case_id),
+                    (now_utc, now_val, now_utc, clean_note, clean_operator, case_id),
                 )
-                if cursor.rowcount > 0 and resolution_note.strip():
+                if cursor.rowcount > 0 and clean_note:
                     self._conn.execute(
                         """
                         INSERT INTO staff_case_messages(
-                            case_id, sender_role, content, created_at_epoch, created_at_utc
-                        ) VALUES (?, 'staff', ?, ?, ?)
+                            case_id, sender_role, content, operator_username, created_at_epoch, created_at_utc
+                        ) VALUES (?, 'staff', ?, ?, ?, ?)
                         """,
-                        (case_id, resolution_note.strip(), now_val, now_utc),
+                        (case_id, clean_note, clean_operator, now_val, now_utc),
                     )
             row = self._conn.execute("SELECT * FROM staff_cases WHERE case_id = ?", (case_id,)).fetchone()
             return self._row_to_case(row) if row is not None else None
@@ -1263,6 +1309,7 @@ class SupportStore:
         errcode: int | None = None,
         errmsg: str = "",
         duration_ms: int | None = None,
+        operator_username: str = "",
         now_epoch: float | None = None,
     ) -> int:
         with self._lock:
@@ -1274,8 +1321,8 @@ class SupportStore:
                     INSERT INTO outbound_replies(
                         account_id, reader_id, trigger_kind, trigger_ref_id,
                         content, delivery_mode, status, errcode, errmsg, duration_ms,
-                        created_at_epoch, created_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        operator_username, created_at_epoch, created_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         account_id or "default",
@@ -1288,6 +1335,7 @@ class SupportStore:
                         errcode,
                         errmsg,
                         duration_ms,
+                        operator_username.strip(),
                         now_val,
                         now_utc,
                     ),
@@ -1321,7 +1369,7 @@ class SupportStore:
             return [dict(row) for row in rows]
 
     def list_librarian_inbox(self, *, before: int | None = None, limit: int = 50) -> list[dict[str, Any]]:
-        """Return retained reader messages for display-only librarian inbox pages."""
+        """Return retained reader messages for librarian inbox pages without exposing reader_id."""
         bounded = max(1, min(limit, 200))
         with self._lock:
             now = float(self._clock())
@@ -1339,7 +1387,7 @@ class SupportStore:
             params.append(bounded)
             rows = self._conn.execute(
                 f"""
-                SELECT seq, received_at_utc, msg_type, content, filter_category
+                SELECT seq, received_at_utc, msg_type, content, filter_category, account_id, reader_id
                 FROM inbound_events
                 WHERE {' AND '.join(clauses)}
                 ORDER BY seq DESC
@@ -1347,7 +1395,54 @@ class SupportStore:
                 """,
                 tuple(params),
             ).fetchall()
-            return [dict(row) for row in rows]
+            if not rows:
+                return []
+
+            seqs = [int(row["seq"]) for row in rows]
+            placeholders = ",".join("?" for _ in seqs)
+            reply_rows = self._conn.execute(
+                f"""
+                SELECT trigger_ref_id, content, created_at_utc, operator_username, status
+                FROM outbound_replies
+                WHERE trigger_kind = 'staff_dashboard_reply'
+                  AND trigger_ref_id IN ({placeholders})
+                ORDER BY reply_id ASC
+                """,
+                seqs,
+            ).fetchall()
+            replies_by_seq: dict[int, list[dict[str, str]]] = {}
+            for rrow in reply_rows:
+                ref_id = int(rrow["trigger_ref_id"])
+                replies_by_seq.setdefault(ref_id, []).append(
+                    {
+                        "content": str(rrow["content"]),
+                        "created_at_utc": str(rrow["created_at_utc"]),
+                        "operator_username": str(rrow["operator_username"] or ""),
+                        "status": str(rrow["status"]),
+                    }
+                )
+
+            quota_cache: dict[tuple[str, str], dict[str, Any]] = {}
+            results: list[dict[str, Any]] = []
+            for row in rows:
+                seq = int(row["seq"])
+                key = (str(row["account_id"]), str(row["reader_id"]))
+                if key not in quota_cache:
+                    quota_cache[key] = self._reader_reply_quota_locked(
+                        key[0], key[1], now_epoch=now
+                    )
+                results.append(
+                    {
+                        "seq": seq,
+                        "received_at_utc": str(row["received_at_utc"]),
+                        "msg_type": str(row["msg_type"]),
+                        "content": str(row["content"]),
+                        "filter_category": str(row["filter_category"]),
+                        "reply_quota": dict(quota_cache[key]),
+                        "staff_replies": list(replies_by_seq.get(seq, [])),
+                    }
+                )
+            return results
 
     def list_batches(self, *, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
         bounded = max(1, min(limit, 200))
@@ -1392,7 +1487,7 @@ class SupportStore:
             for item in cases:
                 msgs = self._conn.execute(
                     """
-                    SELECT item_id, batch_id, event_seq, sender_role, content, created_at_utc
+                    SELECT item_id, batch_id, event_seq, sender_role, content, operator_username, created_at_utc
                     FROM staff_case_messages
                     WHERE case_id = ?
                     ORDER BY item_id ASC
@@ -1582,7 +1677,8 @@ class SupportStore:
             rows = self._conn.execute(
                 """
                 SELECT reply_id, account_id, reader_id, trigger_kind, trigger_ref_id,
-                       content, delivery_mode, status, errcode, errmsg, duration_ms, created_at_utc
+                       content, delivery_mode, status, errcode, errmsg, duration_ms,
+                       operator_username, created_at_utc
                 FROM outbound_replies
                 ORDER BY reply_id DESC
                 LIMIT ?
@@ -2061,7 +2157,9 @@ class SupportStore:
                 "recent_triage_runs": recent_triage_runs,
             }
 
-    def dashboard_librarian_analytics(self, *, now_epoch: float | None = None) -> dict[str, Any]:
+    def dashboard_librarian_analytics(
+        self, now_epoch: float | None = None, include_closed: bool = False
+    ) -> dict[str, Any]:
         """Return UTC+8 librarian queue, latency, and feedback analytics without ever exposing reader_id."""
         with self._lock:
             now_val = float(self._clock() if now_epoch is None else now_epoch)
@@ -2072,7 +2170,7 @@ class SupportStore:
 
             open_emerg_rows = self._conn.execute(
                 """
-                SELECT case_id, case_kind, summary, latest_message, created_at_epoch
+                SELECT case_id, account_id, reader_id, case_kind, summary, latest_message, created_at_epoch
                 FROM staff_cases
                 WHERE status = 'open' AND case_kind = 'emergency'
                 ORDER BY created_at_epoch ASC, case_id ASC
@@ -2081,7 +2179,7 @@ class SupportStore:
             ).fetchall()
             open_todo_rows = self._conn.execute(
                 """
-                SELECT case_id, case_kind, summary, latest_message, created_at_epoch
+                SELECT case_id, account_id, reader_id, case_kind, summary, latest_message, created_at_epoch
                 FROM staff_cases
                 WHERE status = 'open' AND case_kind <> 'emergency'
                 ORDER BY created_at_epoch ASC, case_id ASC
@@ -2089,33 +2187,58 @@ class SupportStore:
                 """
             ).fetchall()
 
-            open_case_ids = [int(r["case_id"]) for r in open_emerg_rows] + [
-                int(r["case_id"]) for r in open_todo_rows
-            ]
-            messages_by_case: dict[int, list[dict[str, str]]] = {cid: [] for cid in open_case_ids}
-            if open_case_ids:
-                placeholders = ",".join("?" for _ in open_case_ids)
+            all_closed_rows = self._conn.execute(
+                """
+                SELECT case_id, account_id, reader_id, case_kind, summary, latest_message,
+                       created_at_epoch, updated_at_epoch, closed_at_utc, resolution_note, closed_by
+                FROM staff_cases
+                WHERE status = 'closed'
+                ORDER BY updated_at_epoch DESC, case_id DESC
+                """
+            ).fetchall()
+
+            closed_detail_rows = all_closed_rows[:50] if include_closed else []
+            msg_case_ids = (
+                [int(r["case_id"]) for r in open_emerg_rows]
+                + [int(r["case_id"]) for r in open_todo_rows]
+                + [int(r["case_id"]) for r in closed_detail_rows]
+            )
+            messages_by_case: dict[int, list[dict[str, str]]] = {cid: [] for cid in msg_case_ids}
+            if msg_case_ids:
+                placeholders = ",".join("?" for _ in msg_case_ids)
                 msg_rows = self._conn.execute(
                     f"""
-                    SELECT case_id, sender_role, content, created_at_epoch
+                    SELECT case_id, sender_role, content, operator_username, created_at_epoch
                     FROM staff_case_messages
                     WHERE case_id IN ({placeholders})
                     ORDER BY item_id ASC
                     """,
-                    open_case_ids,
+                    msg_case_ids,
                 ).fetchall()
                 for mrow in msg_rows:
                     cid = int(mrow["case_id"])
                     if cid in messages_by_case:
-                        messages_by_case[cid].append(
-                            {
-                                "sender_role": str(mrow["sender_role"]),
-                                "content": str(mrow["content"]),
-                                "created_hm": _epoch_to_utc8(float(mrow["created_at_epoch"])).strftime(
-                                    "%H:%M"
-                                ),
-                            }
-                        )
+                        item_msg: dict[str, str] = {
+                            "sender_role": str(mrow["sender_role"]),
+                            "content": str(mrow["content"]),
+                            "created_hm": _epoch_to_utc8(float(mrow["created_at_epoch"])).strftime(
+                                "%H:%M"
+                            ),
+                        }
+                        op_user = str(mrow["operator_username"] or "").strip()
+                        if op_user:
+                            item_msg["operator_username"] = op_user
+                        messages_by_case[cid].append(item_msg)
+
+            quota_cache: dict[tuple[str, str], dict[str, Any]] = {}
+
+            def _quota_for(acct: str, reader: str) -> dict[str, Any]:
+                key = (acct, reader)
+                if key not in quota_cache:
+                    quota_cache[key] = self._reader_reply_quota_locked(
+                        acct, reader, now_epoch=now_val
+                    )
+                return dict(quota_cache[key])
 
             def _build_open_case(row: sqlite3.Row) -> dict[str, Any]:
                 cid = int(row["case_id"])
@@ -2131,6 +2254,7 @@ class SupportStore:
                     "created_hm": created_dt.strftime("%H:%M"),
                     "wait_minutes": wait_minutes,
                     "messages": messages_by_case.get(cid, []),
+                    "reply_quota": _quota_for(str(row["account_id"]), str(row["reader_id"])),
                 }
 
             open_emergency = [_build_open_case(r) for r in open_emerg_rows]
@@ -2189,16 +2313,6 @@ class SupportStore:
             created_today_count = len(created_today_rows)
             for row in created_today_rows:
                 created_by_hour[_epoch_to_utc8(float(row["created_at_epoch"])).hour] += 1
-
-            all_closed_rows = self._conn.execute(
-                """
-                SELECT case_id, case_kind, summary, created_at_epoch, updated_at_epoch,
-                       closed_at_utc, resolution_note
-                FROM staff_cases
-                WHERE status = 'closed'
-                ORDER BY updated_at_epoch DESC, case_id DESC
-                """
-            ).fetchall()
 
             closed_today_samples: list[tuple[float, int, int]] = []
             for row in all_closed_rows:
@@ -2307,6 +2421,31 @@ class SupportStore:
                     }
                 )
 
+            closed_cases: list[dict[str, Any]] = []
+            for row in closed_detail_rows:
+                cid = int(row["case_id"])
+                created_epoch = float(row["created_at_epoch"])
+                created_dt = _epoch_to_utc8(created_epoch)
+                closed_epoch = _parse_closed_epoch(row["closed_at_utc"], float(row["updated_at_epoch"]))
+                closed_dt = _epoch_to_utc8(closed_epoch)
+                closed_cases.append(
+                    {
+                        "case_id": cid,
+                        "case_kind": str(row["case_kind"]),
+                        "status": "closed",
+                        "summary": str(row["summary"]),
+                        "latest_message": str(row["latest_message"]),
+                        "created_at_utc8": created_dt.strftime("%Y-%m-%d %H:%M"),
+                        "created_hm": created_dt.strftime("%H:%M"),
+                        "closed_at_utc8": closed_dt.strftime("%Y-%m-%d %H:%M"),
+                        "closed_hm": closed_dt.strftime("%H:%M"),
+                        "closed_by": str(row["closed_by"] or ""),
+                        "resolution_note": str(row["resolution_note"]),
+                        "messages": messages_by_case.get(cid, []),
+                        "reply_quota": _quota_for(str(row["account_id"]), str(row["reader_id"])),
+                    }
+                )
+
             feedback_rows = self._conn.execute(
                 """
                 SELECT feedback_id, created_at_epoch, content, status, staff_note
@@ -2332,6 +2471,7 @@ class SupportStore:
                 "snapshot_at_utc8": now_dt.strftime("%Y-%m-%d %H:%M"),
                 "open_emergency": open_emergency,
                 "open_todo": open_todo,
+                "closed_cases": closed_cases,
                 "open_counts": open_counts,
                 "wait_buckets": wait_buckets,
                 "longest_wait": longest_wait,
@@ -2343,3 +2483,948 @@ class SupportStore:
                 "recent_closed": recent_closed,
                 "recent_feedbacks": recent_feedbacks,
             }
+
+    # ------------------------------------------------------------------
+    # Dashboard Users & Sessions (RBAC)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_json_str_list(raw: Any) -> list[str]:
+        if not isinstance(raw, str) or not raw.strip():
+            return []
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item).strip() for item in parsed if isinstance(item, str) and item.strip()]
+
+    def _row_to_dashboard_user(self, row: sqlite3.Row) -> dict[str, Any]:
+        perms = normalize_permissions(self._parse_json_str_list(row["permissions_json"]))
+        return {
+            "user_id": int(row["user_id"]),
+            "username": str(row["username"]),
+            "display_name": str(row["display_name"]),
+            "role": str(row["role"]),
+            "permissions": list(perms),
+            "is_active": bool(row["is_active"]),
+            "created_at_utc": str(row["created_at_utc"]),
+            "updated_at_utc": str(row["updated_at_utc"]),
+            "last_login_utc": row["last_login_utc"],
+        }
+
+    def _delete_user_sessions_locked(self, username: str) -> int:
+        cursor = self._conn.execute(
+            "DELETE FROM dashboard_sessions WHERE username = ?",
+            (username,),
+        )
+        return int(cursor.rowcount)
+
+    def create_dashboard_user(
+        self,
+        *,
+        username: str,
+        password: str,
+        display_name: str = "",
+        role: str = "librarian",
+        permissions: Iterable[str] | None = None,
+        is_active: bool = True,
+        now_epoch: float | None = None,
+    ) -> dict[str, Any]:
+        """Create a dashboard user with PBKDF2-hashed password and normalized permissions."""
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not valid_username(clean_user):
+            raise ValueError(f"invalid username: {username!r}")
+        if not isinstance(password, str) or len(password) < 6:
+            raise ValueError("password must be at least 6 characters")
+        clean_role = role.strip() if isinstance(role, str) else ""
+        if clean_role not in VALID_ROLES:
+            raise ValueError(f"invalid role: {role!r}")
+
+        if permissions is None:
+            norm_perms = (
+                ALL_LIBRARIAN_PERMISSIONS if clean_role == "admin" else DEFAULT_LIBRARIAN_PERMISSIONS
+            )
+        else:
+            norm_perms = normalize_permissions(permissions)
+        perms_json = json.dumps(list(norm_perms), ensure_ascii=False, separators=(",", ":"))
+        pw_hash = hash_password(password)
+        clean_display = display_name.strip() if isinstance(display_name, str) else ""
+
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            try:
+                with self._conn:
+                    cursor = self._conn.execute(
+                        """
+                        INSERT INTO dashboard_users(
+                            username, display_name, password_hash, role, permissions_json,
+                            is_active, created_at_epoch, created_at_utc,
+                            updated_at_epoch, updated_at_utc
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            clean_user,
+                            clean_display,
+                            pw_hash,
+                            clean_role,
+                            perms_json,
+                            1 if is_active else 0,
+                            now_val,
+                            now_utc,
+                            now_val,
+                            now_utc,
+                        ),
+                    )
+                    user_id = int(cursor.lastrowid)
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(f"username already exists: {clean_user}") from exc
+            row = self._conn.execute(
+                """
+                SELECT user_id, username, display_name, role, permissions_json, is_active,
+                       created_at_utc, updated_at_utc, last_login_utc
+                FROM dashboard_users
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            assert row is not None
+            return self._row_to_dashboard_user(row)
+
+    def list_dashboard_users(self) -> list[dict[str, Any]]:
+        """List all dashboard users without ever exposing password_hash."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT user_id, username, display_name, role, permissions_json, is_active,
+                       created_at_utc, updated_at_utc, last_login_utc
+                FROM dashboard_users
+                ORDER BY user_id ASC
+                """
+            ).fetchall()
+            return [self._row_to_dashboard_user(row) for row in rows]
+
+    def get_dashboard_user(self, username: str) -> dict[str, Any] | None:
+        """Fetch one dashboard user by username without exposing password_hash."""
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not clean_user:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT user_id, username, display_name, role, permissions_json, is_active,
+                       created_at_utc, updated_at_utc, last_login_utc
+                FROM dashboard_users
+                WHERE username = ?
+                """,
+                (clean_user,),
+            ).fetchone()
+            return self._row_to_dashboard_user(row) if row is not None else None
+
+    def update_dashboard_user(
+        self,
+        username: str,
+        *,
+        display_name: str | None = None,
+        role: str | None = None,
+        permissions: Iterable[str] | None = None,
+        is_active: bool | None = None,
+        now_epoch: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Update dashboard user metadata/permissions; disabling a user invalidates their sessions."""
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not clean_user:
+            return None
+        if role is not None:
+            clean_role = role.strip() if isinstance(role, str) else ""
+            if clean_role not in VALID_ROLES:
+                raise ValueError(f"invalid role: {role!r}")
+        else:
+            clean_role = None
+
+        with self._lock:
+            existing = self._conn.execute(
+                """
+                SELECT user_id, username, display_name, role, permissions_json, is_active
+                FROM dashboard_users
+                WHERE username = ?
+                """,
+                (clean_user,),
+            ).fetchone()
+            if existing is None:
+                return None
+
+            new_display = (
+                display_name.strip() if isinstance(display_name, str) else str(existing["display_name"])
+            )
+            new_role = clean_role if clean_role is not None else str(existing["role"])
+            if permissions is not None:
+                norm_perms = normalize_permissions(permissions)
+                new_perms_json = json.dumps(list(norm_perms), ensure_ascii=False, separators=(",", ":"))
+            else:
+                new_perms_json = str(existing["permissions_json"])
+            new_active = (1 if is_active else 0) if is_active is not None else int(existing["is_active"])
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE dashboard_users
+                    SET display_name = ?,
+                        role = ?,
+                        permissions_json = ?,
+                        is_active = ?,
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?
+                    WHERE username = ?
+                    """,
+                    (new_display, new_role, new_perms_json, new_active, now_val, now_utc, clean_user),
+                )
+                if is_active is False:
+                    self._delete_user_sessions_locked(clean_user)
+
+            row = self._conn.execute(
+                """
+                SELECT user_id, username, display_name, role, permissions_json, is_active,
+                       created_at_utc, updated_at_utc, last_login_utc
+                FROM dashboard_users
+                WHERE username = ?
+                """,
+                (clean_user,),
+            ).fetchone()
+            return self._row_to_dashboard_user(row) if row is not None else None
+
+    def set_dashboard_user_password(
+        self,
+        username: str,
+        new_password: str,
+        *,
+        now_epoch: float | None = None,
+    ) -> bool:
+        """Reset a dashboard user's password and invalidate all active sessions for that user."""
+        if not isinstance(new_password, str) or len(new_password) < 6:
+            raise ValueError("password must be at least 6 characters")
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not clean_user:
+            return False
+        pw_hash = hash_password(new_password)
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                cursor = self._conn.execute(
+                    """
+                    UPDATE dashboard_users
+                    SET password_hash = ?, updated_at_epoch = ?, updated_at_utc = ?
+                    WHERE username = ?
+                    """,
+                    (pw_hash, now_val, now_utc, clean_user),
+                )
+                if cursor.rowcount == 0:
+                    return False
+                self._delete_user_sessions_locked(clean_user)
+                return True
+
+    def verify_dashboard_user(
+        self,
+        username: str,
+        password: str,
+        *,
+        now_epoch: float | None = None,
+    ) -> DashboardPrincipal | None:
+        """Authenticate an active DB dashboard user and record last_login_utc on success."""
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not clean_user or not isinstance(password, str):
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT user_id, username, display_name, password_hash, role, permissions_json, is_active
+                FROM dashboard_users
+                WHERE username = ?
+                """,
+                (clean_user,),
+            ).fetchone()
+            if row is None or not bool(row["is_active"]):
+                return None
+            if not verify_password(password, str(row["password_hash"])):
+                return None
+
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE dashboard_users SET last_login_utc = ? WHERE user_id = ?",
+                    (now_utc, int(row["user_id"])),
+                )
+            role = str(row["role"])
+            perms = (
+                frozenset(ALL_LIBRARIAN_PERMISSIONS)
+                if role == "admin"
+                else frozenset(normalize_permissions(self._parse_json_str_list(row["permissions_json"])))
+            )
+            return DashboardPrincipal(
+                username=str(row["username"]),
+                display_name=str(row["display_name"]),
+                role=role,
+                permissions=perms,
+                source="db",
+            )
+
+    def create_dashboard_session(
+        self,
+        username: str,
+        role: str,
+        *,
+        ttl_seconds: float = 12 * 3600,
+        now_epoch: float | None = None,
+    ) -> str:
+        """Create a persisted dashboard session and return the raw bearer/cookie token."""
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not clean_user:
+            raise ValueError("username must be non-empty")
+        clean_role = role.strip() if isinstance(role, str) else ""
+        if clean_role not in VALID_ROLES:
+            raise ValueError(f"invalid role: {role!r}")
+
+        token = generate_session_token()
+        token_hash = hash_session_token(token)
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            expires_at = now_val + float(ttl_seconds)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO dashboard_sessions(
+                        token_hash, username, role, created_at_epoch, expires_at_epoch, last_seen_epoch
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (token_hash, clean_user, clean_role, now_val, expires_at, now_val),
+                )
+        return token
+
+    def get_dashboard_session(
+        self, token: str, *, now_epoch: float | None = None
+    ) -> dict[str, Any] | None:
+        """Look up a session by raw token; deletes and returns None if expired."""
+        if not isinstance(token, str) or not token.strip():
+            return None
+        token_hash = hash_session_token(token)
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            row = self._conn.execute(
+                """
+                SELECT token_hash, username, role, expires_at_epoch
+                FROM dashboard_sessions
+                WHERE token_hash = ?
+                """,
+                (token_hash,),
+            ).fetchone()
+            if row is None:
+                return None
+            expires_at = float(row["expires_at_epoch"])
+            if expires_at <= now_val:
+                with self._conn:
+                    self._conn.execute(
+                        "DELETE FROM dashboard_sessions WHERE token_hash = ?",
+                        (token_hash,),
+                    )
+                return None
+            with self._conn:
+                self._conn.execute(
+                    "UPDATE dashboard_sessions SET last_seen_epoch = ? WHERE token_hash = ?",
+                    (now_val, token_hash),
+                )
+            return {
+                "username": str(row["username"]),
+                "role": str(row["role"]),
+                "expires_at_epoch": expires_at,
+            }
+
+    def delete_dashboard_session(self, token: str) -> None:
+        """Delete one session by raw token."""
+        if not isinstance(token, str) or not token:
+            return
+        token_hash = hash_session_token(token)
+        with self._lock:
+            with self._conn:
+                self._conn.execute(
+                    "DELETE FROM dashboard_sessions WHERE token_hash = ?",
+                    (token_hash,),
+                )
+
+    def delete_user_sessions(self, username: str) -> int:
+        """Delete all sessions belonging to a username and return deleted row count."""
+        clean_user = username.strip() if isinstance(username, str) else ""
+        if not clean_user:
+            return 0
+        with self._lock:
+            with self._conn:
+                return self._delete_user_sessions_locked(clean_user)
+
+    def purge_expired_sessions(self, now_epoch: float | None = None) -> int:
+        """Delete all expired sessions and return deleted row count."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            with self._conn:
+                cursor = self._conn.execute(
+                    "DELETE FROM dashboard_sessions WHERE expires_at_epoch <= ?",
+                    (now_val,),
+                )
+                return int(cursor.rowcount)
+
+    # ------------------------------------------------------------------
+    # Direct Reply Quota & Target Helpers
+    # ------------------------------------------------------------------
+
+    def _reader_reply_quota_locked(
+        self, account_id: str, reader_id: str, *, now_epoch: float
+    ) -> dict[str, Any]:
+        acct = (account_id or "default").strip() or "default"
+        clean_reader = reader_id.strip() if isinstance(reader_id, str) else ""
+        if not clean_reader:
+            return {
+                "window_open": False,
+                "window_remaining_seconds": 0,
+                "sent_in_window": 0,
+                "quota_limit": WECHAT_INTERACTION_QUOTA_LIMIT,
+                "quota_remaining": 0,
+                "can_reply": False,
+                "blocked_reason": "no_inbound",
+            }
+        row = self._conn.execute(
+            """
+            SELECT MAX(received_at_epoch) AS last_inbound
+            FROM inbound_events
+            WHERE account_id = ? AND reader_id = ?
+              AND LOWER(msg_type) <> 'event' AND event = ''
+            """,
+            (acct, clean_reader),
+        ).fetchone()
+        if row is None or row["last_inbound"] is None:
+            return {
+                "window_open": False,
+                "window_remaining_seconds": 0,
+                "sent_in_window": 0,
+                "quota_limit": WECHAT_INTERACTION_QUOTA_LIMIT,
+                "quota_remaining": 0,
+                "can_reply": False,
+                "blocked_reason": "no_inbound",
+            }
+
+        last_inbound = float(row["last_inbound"])
+        window_remaining_seconds = max(
+            0, int((last_inbound + WECHAT_INTERACTION_WINDOW_SECONDS) - now_epoch)
+        )
+        window_open = window_remaining_seconds > 0
+        window_start = max(last_inbound, now_epoch - WECHAT_INTERACTION_WINDOW_SECONDS)
+        sent_in_window = int(
+            self._conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM outbound_replies
+                WHERE account_id = ? AND reader_id = ?
+                  AND status = 'sent'
+                  AND created_at_epoch >= ?
+                """,
+                (acct, clean_reader, window_start),
+            ).fetchone()[0]
+        )
+        quota_remaining = max(0, WECHAT_INTERACTION_QUOTA_LIMIT - sent_in_window)
+        can_reply = window_open and quota_remaining > 0
+        blocked_reason = "" if can_reply else ("window_expired" if not window_open else "quota_exhausted")
+        return {
+            "window_open": window_open,
+            "window_remaining_seconds": window_remaining_seconds,
+            "sent_in_window": sent_in_window,
+            "quota_limit": WECHAT_INTERACTION_QUOTA_LIMIT,
+            "quota_remaining": quota_remaining,
+            "can_reply": can_reply,
+            "blocked_reason": blocked_reason,
+        }
+
+    def get_reader_reply_quota(
+        self, account_id: str, reader_id: str, *, now_epoch: float | None = None
+    ) -> dict[str, Any]:
+        """Compute a reader's WeChat 48h interaction window and 5-message reply quota without returning reader_id."""
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            return self._reader_reply_quota_locked(account_id, reader_id, now_epoch=now_val)
+
+    def get_staff_case_target(self, case_id: int) -> dict[str, Any] | None:
+        """Return internal routing metadata for a staff case (backend-only, contains reader_id)."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT case_id, account_id, reader_id, case_kind, status, summary, latest_message
+                FROM staff_cases
+                WHERE case_id = ?
+                """,
+                (int(case_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "case_id": int(row["case_id"]),
+                "account_id": str(row["account_id"]),
+                "reader_id": str(row["reader_id"]),
+                "case_kind": str(row["case_kind"]),
+                "status": str(row["status"]),
+                "summary": str(row["summary"]),
+                "latest_message": str(row["latest_message"]),
+            }
+
+    def get_inbox_event_target(self, event_seq: int) -> dict[str, Any] | None:
+        """Return internal routing metadata for a non-event reader inbox message (backend-only)."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT seq, account_id, reader_id, content, received_at_epoch, staff_case_id
+                FROM inbound_events
+                WHERE seq = ?
+                  AND reader_id <> ''
+                  AND LOWER(msg_type) <> 'event'
+                  AND event = ''
+                """,
+                (int(event_seq),),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "seq": int(row["seq"]),
+                "account_id": str(row["account_id"]),
+                "reader_id": str(row["reader_id"]),
+                "content": str(row["content"]),
+                "received_at_epoch": float(row["received_at_epoch"]),
+                "staff_case_id": int(row["staff_case_id"]) if row["staff_case_id"] is not None else None,
+            }
+
+    def append_staff_case_reply(
+        self,
+        case_id: int,
+        content: str,
+        *,
+        operator_username: str = "",
+        now_epoch: float | None = None,
+    ) -> bool:
+        """Record a staff reply message on an open or closed staff case."""
+        clean_content = content.strip() if isinstance(content, str) else ""
+        if not clean_content:
+            return False
+        clean_operator = operator_username.strip() if isinstance(operator_username, str) else ""
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT case_id FROM staff_cases WHERE case_id = ?",
+                (int(case_id),),
+            ).fetchone()
+            if existing is None:
+                return False
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    INSERT INTO staff_case_messages(
+                        case_id, sender_role, content, operator_username, created_at_epoch, created_at_utc
+                    ) VALUES (?, 'staff', ?, ?, ?, ?)
+                    """,
+                    (int(case_id), clean_content, clean_operator, now_val, now_utc),
+                )
+                self._conn.execute(
+                    """
+                    UPDATE staff_cases
+                    SET updated_at_epoch = ?, updated_at_utc = ?
+                    WHERE case_id = ?
+                    """,
+                    (now_val, now_utc, int(case_id)),
+                )
+            return True
+
+    # ------------------------------------------------------------------
+    # Preset Drafts CRUD
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clean_string_sequence(items: Sequence[str] | Iterable[str], *, deduplicate: bool = False) -> list[str]:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, str):
+                continue
+            val = item.strip()
+            if not val:
+                continue
+            if deduplicate:
+                if val in seen:
+                    continue
+                seen.add(val)
+            cleaned.append(val)
+        return cleaned
+
+    def _row_to_preset_draft(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "draft_id": int(row["draft_id"]),
+            "source_case_id": int(row["source_case_id"]) if row["source_case_id"] is not None else None,
+            "source_event_seq": int(row["source_event_seq"]) if row["source_event_seq"] is not None else None,
+            "source_question": str(row["source_question"]),
+            "staff_reply": str(row["staff_reply"]),
+            "mode": str(row["mode"]),
+            "target_preset_id": str(row["target_preset_id"]),
+            "preset_id": str(row["preset_id"]),
+            "title": str(row["title"]),
+            "aliases": self._parse_json_str_list(row["aliases_json"]),
+            "applicability": str(row["applicability"]),
+            "body": str(row["body"]),
+            "ai_generation_note": str(row["ai_generation_note"]),
+            "ai_review_status": str(row["ai_review_status"]),
+            "ai_review_reasons": self._parse_json_str_list(row["ai_review_reasons_json"]),
+            "ai_review_suggestion": str(row["ai_review_suggestion"]),
+            "status": str(row["status"]),
+            "created_by": str(row["created_by"]),
+            "reviewed_by": str(row["reviewed_by"]),
+            "created_at_epoch": float(row["created_at_epoch"]),
+            "created_at_utc": str(row["created_at_utc"]),
+            "updated_at_epoch": float(row["updated_at_epoch"]),
+            "updated_at_utc": str(row["updated_at_utc"]),
+            "published_at_utc": row["published_at_utc"],
+        }
+
+    def create_preset_draft(
+        self,
+        *,
+        source_case_id: int | None = None,
+        source_event_seq: int | None = None,
+        source_question: str = "",
+        staff_reply: str = "",
+        mode: str = "create",
+        target_preset_id: str = "",
+        preset_id: str = "",
+        title: str = "",
+        aliases: Sequence[str] = (),
+        applicability: str = "",
+        body: str = "",
+        ai_generation_note: str = "",
+        created_by: str = "",
+        now_epoch: float | None = None,
+    ) -> dict[str, Any]:
+        """Persist a newly generated `1.` preset template draft."""
+        clean_mode = mode.strip() if isinstance(mode, str) else "create"
+        if clean_mode not in ("create", "merge"):
+            raise ValueError(f"invalid draft mode: {mode!r}")
+        aliases_list = self._clean_string_sequence(aliases, deduplicate=True)
+        aliases_json = json.dumps(aliases_list, ensure_ascii=False, separators=(",", ":"))
+
+        with self._lock:
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                cursor = self._conn.execute(
+                    """
+                    INSERT INTO preset_drafts(
+                        source_case_id, source_event_seq, source_question, staff_reply,
+                        mode, target_preset_id, preset_id, title, aliases_json,
+                        applicability, body, ai_generation_note,
+                        ai_review_status, ai_review_reasons_json, ai_review_suggestion,
+                        status, created_by, reviewed_by,
+                        created_at_epoch, created_at_utc, updated_at_epoch, updated_at_utc
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '[]', '', 'draft', ?, '', ?, ?, ?, ?)
+                    """,
+                    (
+                        source_case_id,
+                        source_event_seq,
+                        source_question.strip(),
+                        staff_reply.strip(),
+                        clean_mode,
+                        target_preset_id.strip(),
+                        preset_id.strip(),
+                        title.strip(),
+                        aliases_json,
+                        applicability.strip(),
+                        body.strip(),
+                        ai_generation_note.strip(),
+                        created_by.strip(),
+                        now_val,
+                        now_utc,
+                        now_val,
+                        now_utc,
+                    ),
+                )
+                draft_id = int(cursor.lastrowid)
+            row = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (draft_id,),
+            ).fetchone()
+            assert row is not None
+            return self._row_to_preset_draft(row)
+
+    def get_preset_draft(self, draft_id: int) -> dict[str, Any] | None:
+        """Fetch one preset draft by ID."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            return self._row_to_preset_draft(row) if row is not None else None
+
+    def list_preset_drafts(
+        self, *, status: str | None = None, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List preset drafts ordered by most recently updated."""
+        bounded = max(1, min(limit, 200))
+        where_sql = "WHERE status = ?" if status else ""
+        params: tuple[Any, ...] = (status, bounded) if status else (bounded,)
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT * FROM preset_drafts
+                {where_sql}
+                ORDER BY updated_at_epoch DESC, draft_id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+            return [self._row_to_preset_draft(row) for row in rows]
+
+    def update_preset_draft(
+        self,
+        draft_id: int,
+        *,
+        mode: str | None = None,
+        target_preset_id: str | None = None,
+        preset_id: str | None = None,
+        title: str | None = None,
+        aliases: Sequence[str] | None = None,
+        applicability: str | None = None,
+        body: str | None = None,
+        now_epoch: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Edit preset draft fields and reset ai_review_status to 'pending' whenever content changes."""
+        if mode is not None:
+            clean_mode = mode.strip() if isinstance(mode, str) else ""
+            if clean_mode not in ("create", "merge"):
+                raise ValueError(f"invalid draft mode: {mode!r}")
+        else:
+            clean_mode = None
+
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            if existing is None:
+                return None
+
+            new_mode = clean_mode if clean_mode is not None else str(existing["mode"])
+            new_target = (
+                target_preset_id.strip() if target_preset_id is not None else str(existing["target_preset_id"])
+            )
+            new_preset_id = preset_id.strip() if preset_id is not None else str(existing["preset_id"])
+            new_title = title.strip() if title is not None else str(existing["title"])
+            if aliases is not None:
+                new_aliases_list = self._clean_string_sequence(aliases, deduplicate=True)
+                new_aliases_json = json.dumps(new_aliases_list, ensure_ascii=False, separators=(",", ":"))
+            else:
+                new_aliases_json = str(existing["aliases_json"])
+            new_applicability = (
+                applicability.strip() if applicability is not None else str(existing["applicability"])
+            )
+            new_body = body.strip() if body is not None else str(existing["body"])
+
+            content_changed = (
+                new_mode != str(existing["mode"])
+                or new_target != str(existing["target_preset_id"])
+                or new_preset_id != str(existing["preset_id"])
+                or new_title != str(existing["title"])
+                or new_aliases_json != str(existing["aliases_json"])
+                or new_applicability != str(existing["applicability"])
+                or new_body != str(existing["body"])
+            )
+            new_review_status = "pending" if content_changed else str(existing["ai_review_status"])
+            new_review_reasons = "[]" if content_changed else str(existing["ai_review_reasons_json"])
+            new_review_suggestion = "" if content_changed else str(existing["ai_review_suggestion"])
+
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE preset_drafts
+                    SET mode = ?,
+                        target_preset_id = ?,
+                        preset_id = ?,
+                        title = ?,
+                        aliases_json = ?,
+                        applicability = ?,
+                        body = ?,
+                        ai_review_status = ?,
+                        ai_review_reasons_json = ?,
+                        ai_review_suggestion = ?,
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?
+                    WHERE draft_id = ?
+                    """,
+                    (
+                        new_mode,
+                        new_target,
+                        new_preset_id,
+                        new_title,
+                        new_aliases_json,
+                        new_applicability,
+                        new_body,
+                        new_review_status,
+                        new_review_reasons,
+                        new_review_suggestion,
+                        now_val,
+                        now_utc,
+                        int(draft_id),
+                    ),
+                )
+            row = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            return self._row_to_preset_draft(row) if row is not None else None
+
+    def set_preset_draft_review(
+        self,
+        draft_id: int,
+        *,
+        ai_review_status: str,
+        reasons: Sequence[str],
+        suggestion: str,
+        reviewed_by: str = "",
+        now_epoch: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist deterministic/AI review outcome on a preset draft."""
+        clean_status = ai_review_status.strip() if isinstance(ai_review_status, str) else ""
+        if not clean_status:
+            raise ValueError("ai_review_status must be non-empty")
+        reasons_json = json.dumps(
+            self._clean_string_sequence(reasons), ensure_ascii=False, separators=(",", ":")
+        )
+        clean_suggestion = suggestion.strip() if isinstance(suggestion, str) else ""
+        clean_reviewer = reviewed_by.strip() if isinstance(reviewed_by, str) else ""
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT reviewed_by FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            if existing is None:
+                return None
+            final_reviewer = clean_reviewer or str(existing["reviewed_by"])
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE preset_drafts
+                    SET ai_review_status = ?,
+                        ai_review_reasons_json = ?,
+                        ai_review_suggestion = ?,
+                        reviewed_by = ?,
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?
+                    WHERE draft_id = ?
+                    """,
+                    (
+                        clean_status,
+                        reasons_json,
+                        clean_suggestion,
+                        final_reviewer,
+                        now_val,
+                        now_utc,
+                        int(draft_id),
+                    ),
+                )
+            row = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            return self._row_to_preset_draft(row) if row is not None else None
+
+    def mark_preset_draft_published(
+        self,
+        draft_id: int,
+        *,
+        reviewed_by: str = "",
+        now_epoch: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Mark a preset draft as published and record published_at_utc."""
+        clean_reviewer = reviewed_by.strip() if isinstance(reviewed_by, str) else ""
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT reviewed_by FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            if existing is None:
+                return None
+            final_reviewer = clean_reviewer or str(existing["reviewed_by"])
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE preset_drafts
+                    SET status = 'published',
+                        reviewed_by = ?,
+                        published_at_utc = ?,
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?
+                    WHERE draft_id = ?
+                    """,
+                    (final_reviewer, now_utc, now_val, now_utc, int(draft_id)),
+                )
+            row = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            return self._row_to_preset_draft(row) if row is not None else None
+
+    def reject_preset_draft(
+        self,
+        draft_id: int,
+        *,
+        reviewed_by: str = "",
+        reason: str = "",
+        now_epoch: float | None = None,
+    ) -> dict[str, Any] | None:
+        """Mark a preset draft as rejected and optionally append a rejection reason."""
+        clean_reviewer = reviewed_by.strip() if isinstance(reviewed_by, str) else ""
+        clean_reason = reason.strip() if isinstance(reason, str) else ""
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT reviewed_by, ai_review_reasons_json FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            if existing is None:
+                return None
+            final_reviewer = clean_reviewer or str(existing["reviewed_by"])
+            reasons = self._parse_json_str_list(existing["ai_review_reasons_json"])
+            if clean_reason and clean_reason not in reasons:
+                reasons.append(clean_reason)
+            reasons_json = json.dumps(reasons, ensure_ascii=False, separators=(",", ":"))
+            now_val = float(self._clock() if now_epoch is None else now_epoch)
+            now_utc = _utc_iso(now_val)
+            with self._conn:
+                self._conn.execute(
+                    """
+                    UPDATE preset_drafts
+                    SET status = 'rejected',
+                        reviewed_by = ?,
+                        ai_review_reasons_json = ?,
+                        updated_at_epoch = ?,
+                        updated_at_utc = ?
+                    WHERE draft_id = ?
+                    """,
+                    (final_reviewer, reasons_json, now_val, now_utc, int(draft_id)),
+                )
+            row = self._conn.execute(
+                "SELECT * FROM preset_drafts WHERE draft_id = ?",
+                (int(draft_id),),
+            ).fetchone()
+            return self._row_to_preset_draft(row) if row is not None else None
