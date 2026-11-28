@@ -757,7 +757,12 @@ def _render_charts_row(
     return f"{pace_panel}{latency_panel}"
 
 
-def _render_feedback_panel(recent_feedbacks: Sequence[Mapping[str, Any]]) -> str:
+def _render_feedback_panel(
+    recent_feedbacks: Sequence[Mapping[str, Any]],
+    *,
+    split: bool = False,
+) -> str:
+    panel_cls = "panel panel--feedback-split" if split else "panel panel--span-12"
     count = len(recent_feedbacks)
     header = (
         '<div class="panel-head">'
@@ -767,7 +772,7 @@ def _render_feedback_panel(recent_feedbacks: Sequence[Mapping[str, Any]]) -> str
     )
     if not recent_feedbacks:
         return (
-            '<section id="feedback" class="panel panel--span-12" aria-labelledby="feedback-title">'
+            f'<section id="feedback" class="{panel_cls}" aria-labelledby="feedback-title">'
             f"{header}"
             '<p class="panel-note">暂无意见反馈。</p>'
             "</section>"
@@ -793,7 +798,7 @@ def _render_feedback_panel(recent_feedbacks: Sequence[Mapping[str, Any]]) -> str
             "</li>"
         )
     return (
-        '<section id="feedback" class="panel panel--span-12" aria-labelledby="feedback-title">'
+        f'<section id="feedback" class="{panel_cls}" aria-labelledby="feedback-title">'
         f'{header}<ul class="case-list">{"".join(rows)}</ul>'
         "</section>"
     )
@@ -869,8 +874,8 @@ def render_librarian_workbench(
     inbox_count: int | None
     if data.get("inbox_count") is not None:
         inbox_count = max(0, _int(data.get("inbox_count")))
-    elif 'class="case-row"' in inbox_html:
-        inbox_count = inbox_html.count('class="case-row"')
+    elif 'class="case-row' in inbox_html:
+        inbox_count = inbox_html.count('class="case-row')
     else:
         inbox_count = None
 
@@ -934,10 +939,12 @@ def render_librarian_workbench(
                 hbar_fn=hbar_fn,
             )
         )
-    if show_feedback:
-        grid_parts.append(_render_feedback_panel(recent_feedbacks))
+    split_bottom = show_inbox and show_feedback
     if show_inbox:
-        grid_parts.append(f'<div id="inbox" class="panel--span-12">{inbox_html}</div>')
+        inbox_cls = "panel--inbox-split" if split_bottom else "panel--span-12"
+        grid_parts.append(f'<div id="inbox" class="{inbox_cls}">{inbox_html}</div>')
+    if show_feedback:
+        grid_parts.append(_render_feedback_panel(recent_feedbacks, split=split_bottom))
 
     parts.append(f'<div class="dashboard-grid">{"".join(grid_parts)}</div>')
     return "".join(parts)

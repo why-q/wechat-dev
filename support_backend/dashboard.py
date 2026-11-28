@@ -453,13 +453,13 @@ def _dynamic_allowlist_rows(entries: list[dict[str, object]]) -> str:
         item_value = f"{account_id}\t{reader_id}"
         rows.append(
             "<tr>"
-            '<td><input class="allowlist-check" type="checkbox" form="allowlist-batch-form" '
+            '<td class="allowlist-cell-check"><input class="allowlist-check" type="checkbox" form="allowlist-batch-form" '
             f'name="item" value="{_escape(item_value)}" aria-label="选择 {_escape(reader_id)}"></td>'
-            f'<td><code>{_escape(account_id)}</code></td>'
-            f'<td class="allowlist-reader"><code>{_escape(reader_id)}</code></td>'
-            f"<td>{_escape(source)}</td>"
-            f"<td>{_escape(updated)}</td>"
-            '<td><details class="trash-confirm">'
+            f'<td data-label="账户 ID"><code>{_escape(account_id)}</code></td>'
+            f'<td class="allowlist-reader" data-label="读者 OpenID"><code>{_escape(reader_id)}</code></td>'
+            f'<td data-label="来源">{_escape(source)}</td>'
+            f'<td data-label="最近更新">{_escape(updated)}</td>'
+            '<td class="allowlist-cell-action"><details class="trash-confirm">'
             f'<summary class="icon-btn icon-btn--danger" aria-label="移出 {_escape(reader_id)}" title="移出">'
             f"{_TRASH_ICON_SVG}</summary>"
             '<form class="trash-confirm-popover" method="post" action="/dashboard/admin/allowlist/remove">'
@@ -497,7 +497,9 @@ def _admin_allowlist_panel(store: SupportStore, pipeline: object, metrics: dict[
         '<div class="table-wrap"><table class="data-table allowlist-table">'
         '<caption class="sr-only">动态自动回复允许名单</caption>'
         '<thead><tr>'
-        '<th scope="col"><input type="checkbox" id="allowlist-select-all" aria-label="全选动态条目"></th>'
+        '<th scope="col"><label class="allowlist-select-wrap">'
+        '<input type="checkbox" id="allowlist-select-all" aria-label="全选动态条目">'
+        '<span class="allowlist-select-label">全选</span></label></th>'
         '<th scope="col">账户 ID</th><th scope="col">读者 OpenID</th>'
         '<th scope="col">来源</th><th scope="col">最近更新</th><th scope="col">操作</th>'
         "</tr></thead>"

@@ -205,7 +205,7 @@ class LibrarianWorkbenchTests(unittest.TestCase):
         self.assertIn("已转物业评估", html_out)
 
         # Retained inbox HTML preserved verbatim inside wrapper
-        self.assertIn(f'<div id="inbox" class="panel--span-12">{inbox_html}</div>', html_out)
+        self.assertIn(f'<div id="inbox" class="panel--inbox-split">{inbox_html}</div>', html_out)
 
         # Privacy & security: no reader_id / OpenID, no script or inline event handlers
         self.assertNotIn("o_secret_", html_out)
