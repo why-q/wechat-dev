@@ -426,6 +426,96 @@ class SupportPipeline:
             content=content,
         )
 
+    async def deliver_staff_reply(
+        self,
+        *,
+        account_id: str,
+        reader_id: str,
+        trigger_ref_id: int | None,
+        content: str,
+        operator_username: str = "",
+        trigger_kind: str = "staff_dashboard_reply",
+    ) -> dict[str, Any]:
+        """Send an explicit librarian reply directly via custom/send, bypassing auto-reply allowlist gating."""
+        if self.send_text_fn is None:
+            reply_id = self.store.record_outbound_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind=trigger_kind,
+                trigger_ref_id=trigger_ref_id,
+                content=content,
+                delivery_mode="direct_https",
+                status="failed",
+                errmsg="send_client_unavailable",
+                operator_username=operator_username,
+            )
+            return {
+                "ok": False,
+                "reply_id": reply_id,
+                "errcode": None,
+                "errmsg": "send_client_unavailable",
+            }
+        try:
+            result = await asyncio.to_thread(self.send_text_fn, reader_id, content)
+        except Exception as exc:
+            reply_id = self.store.record_outbound_reply(
+                account_id=account_id,
+                reader_id=reader_id,
+                trigger_kind=trigger_kind,
+                trigger_ref_id=trigger_ref_id,
+                content=content,
+                delivery_mode="direct_https",
+                status="failed",
+                errmsg=type(exc).__name__,
+                operator_username=operator_username,
+            )
+            _LOGGER.warning(
+                "Staff dashboard reply failed: reply_id=%d ref_id=%s reason=%s",
+                reply_id,
+                trigger_ref_id if trigger_ref_id is not None else "-",
+                type(exc).__name__,
+            )
+            return {
+                "ok": False,
+                "reply_id": reply_id,
+                "errcode": None,
+                "errmsg": type(exc).__name__,
+            }
+
+        ok = bool(result.get("ok"))
+        errcode = result.get("errcode") if type(result.get("errcode")) is int else None
+        errmsg = _safe_errmsg(result.get("errmsg"))
+        duration_ms = result.get("duration_ms") if type(result.get("duration_ms")) is int else None
+        delivery_mode = result.get("mode") if isinstance(result.get("mode"), str) else "direct_https"
+        reply_id = self.store.record_outbound_reply(
+            account_id=account_id,
+            reader_id=reader_id,
+            trigger_kind=trigger_kind,
+            trigger_ref_id=trigger_ref_id,
+            content=content,
+            delivery_mode=delivery_mode,
+            status="sent" if ok else "failed",
+            errcode=errcode,
+            errmsg=errmsg,
+            duration_ms=duration_ms,
+            operator_username=operator_username,
+        )
+        _LOGGER.info(
+            "Staff dashboard reply finished: reply_id=%d ref_id=%s ok=%s errcode=%s duration_ms=%s",
+            reply_id,
+            trigger_ref_id if trigger_ref_id is not None else "-",
+            str(ok).lower(),
+            errcode if errcode is not None else "-",
+            duration_ms if duration_ms is not None else "-",
+        )
+        return {
+            "ok": ok,
+            "reply_id": reply_id,
+            "errcode": errcode,
+            "errmsg": errmsg,
+            "duration_ms": duration_ms,
+        }
+
     async def _deliver_reply(
         self,
         *,

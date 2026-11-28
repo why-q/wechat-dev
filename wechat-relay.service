@@ -20,6 +20,7 @@ EnvironmentFile=/etc/wechat-relay.env
 Environment=RELAY_LOG_PATH=/var/lib/private/wechat-relay/relay-events.jsonl
 Environment=SUPPORT_DB_PATH=/var/lib/private/wechat-relay/library-support.db
 Environment=SUPPORT_CORPUS_DIR=/srv/wechat-relay/rag-poc/corpus
+Environment=SUPPORT_DYNAMIC_PRESETS_DIR=/var/lib/private/wechat-relay/presets
 Environment=SUPPORT_INDEX_DIR=/srv/wechat-relay/rag-poc/index_v2
 Environment=RAG_NLTK_DATA_DIR=/var/lib/private/wechat-relay/nltk_data
 Environment=PYTHONDONTWRITEBYTECODE=1

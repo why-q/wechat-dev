@@ -423,7 +423,14 @@ async def _lifespan(application: FastAPI):
         merge_enabled=_SUPPORT_MERGE_ENABLED,
         max_preempts=_SUPPORT_IMMEDIATE_MAX_PREEMPTS,
     )
-    preset_catalog = PresetCatalog.from_corpus_dir(Path(_SUPPORT_CORPUS_DIR_RAW))
+    corpus_dir = Path(_SUPPORT_CORPUS_DIR_RAW)
+    dynamic_presets_raw = os.environ.get("SUPPORT_DYNAMIC_PRESETS_DIR", "").strip()
+    dynamic_presets_dir = (
+        Path(dynamic_presets_raw)
+        if dynamic_presets_raw
+        else (db_path.parent / "presets")
+    )
+    preset_catalog = PresetCatalog.from_corpus_dirs(corpus_dir, dynamic_presets_dir)
 
     decision_client: SystemOneClient | None = None
     if _SUPPORT_DECISION_BASE_URL and _SUPPORT_DECISION_API_KEY:
@@ -463,6 +470,8 @@ async def _lifespan(application: FastAPI):
         knowledge_responder=knowledge_responder,
         clarify_generator=knowledge_responder.generate_clarify_question if knowledge_responder is not None else None,
         preset_min_confidence=_SUPPORT_PRESET_MIN_CONFIDENCE,
+        corpus_dir=corpus_dir,
+        dynamic_presets_dir=dynamic_presets_dir,
     )
     pipeline = SupportPipeline(
         support_store,
