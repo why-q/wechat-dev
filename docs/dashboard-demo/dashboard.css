@@ -1355,11 +1355,30 @@ summary:focus-visible {
   font-weight: 600;
 }
 
+.reply-quota-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 2px;
+}
+
+.panel-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.queue-row--closed {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
 .reply-form {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin-top: 8px;
-  padding: 8px;
+  padding: 9px 10px;
   background: var(--surface-tint);
   border: 1px solid var(--rule);
   border-radius: var(--radius-small);
@@ -1371,12 +1390,17 @@ summary:focus-visible {
   line-height: 1.5;
 }
 
-.reply-actions {
+.reply-actions,
+.reply-form-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px 10px;
+  gap: 8px 12px;
+}
+
+.reply-form-actions .confirm-label {
+  min-height: 28px;
+  margin-right: auto;
 }
 
 .reply-btn-group {
@@ -2509,6 +2533,11 @@ summary:focus-visible {
   .case-row--compact .inbox-text {
     grid-column: 1 / -1;
     grid-row: 2;
+  }
+
+  .reply-form-actions .confirm-label {
+    flex: 1 0 100%;
+    margin-right: 0;
   }
 }
 
