@@ -897,6 +897,85 @@ def _render_alert_rows(alerts: Sequence[Any]) -> str:
     return f'<ol class="alert-list">{"".join(rows)}</ol>'
 
 
+def render_triage_audit_panel(recent_triage_runs: Sequence[Mapping[str, Any]]) -> str:
+    """Render sanitized recent triage routing audit panel (metadata only, no PII)."""
+    rows_clean = [row for row in recent_triage_runs if isinstance(row, Mapping)]
+    header = (
+        '<div class="panel-head">'
+        '<h2 id="triage-audit-title">最近分诊路由审计</h2>'
+        f'<span class="period-chip">最近 {_fmt_count(len(rows_clean))} 次 · 仅路由元数据</span>'
+        "</div>"
+    )
+    if not rows_clean:
+        return (
+            '<section class="panel panel--span-12" aria-labelledby="triage-audit-title">'
+            f'{header}<p class="panel-note">暂无分诊记录。</p>'
+            "</section>"
+        )
+
+    items: list[str] = []
+    for row in rows_clean:
+        run_id = _safe_int(row.get("run_id", 0))
+        time_utc8 = str(row.get("time_utc8") or "--:--")
+        stage_label = str(row.get("stage_label") or row.get("stage_path") or "未知路径")
+        stage_path = str(row.get("stage_path") or "")
+        severity = str(row.get("severity") or "muted").strip().lower()
+        if severity not in ("good", "ochre", "urgent", "muted"):
+            severity = "muted"
+
+        meta_parts: list[str] = []
+        preset_id = str(row.get("preset_id") or "").strip()
+        section_title = str(row.get("section_title") or "").strip()
+        decision_route = str(row.get("decision_route") or "").strip()
+        if preset_id:
+            meta_parts.append(f"预设 {preset_id}")
+        if section_title:
+            meta_parts.append(f"出处「{section_title}」")
+        if decision_route:
+            conf = row.get("decision_confidence")
+            if conf is not None:
+                try:
+                    meta_parts.append(f"决策 {decision_route} ({float(conf):.2f})")
+                except (TypeError, ValueError):
+                    meta_parts.append(f"决策 {decision_route}")
+            else:
+                meta_parts.append(f"决策 {decision_route}")
+        if row.get("clarified_already"):
+            meta_parts.append("澄清后续判")
+        if not meta_parts and stage_path:
+            meta_parts.append(stage_path)
+
+        dur_ms = row.get("decision_duration_ms")
+        dur_html = ""
+        if dur_ms is not None:
+            try:
+                dur_html = f'<span class="triage-ms">{int(dur_ms)}ms</span>'
+            except (TypeError, ValueError):
+                dur_html = ""
+
+        case_id = row.get("staff_case_id")
+        case_html = (
+            f'<span class="badge ochre">工单 #{int(case_id)}</span>'
+            if case_id is not None and _safe_int(case_id) > 0
+            else ""
+        )
+
+        items.append(
+            '<li class="triage-row">'
+            f'<time class="inbox-time">{_escape(time_utc8)}</time>'
+            f'<span class="badge {_escape(severity)}">{_escape(stage_label)}</span>'
+            f'<span class="triage-meta">{_escape(" · ".join(meta_parts))}</span>'
+            f'<span class="triage-tail">{dur_html}{case_html}<span class="triage-id">#{run_id}</span></span>'
+            "</li>"
+        )
+
+    return (
+        '<section class="panel panel--span-12" aria-labelledby="triage-audit-title">'
+        f'{header}<ol class="triage-list">{"".join(items)}</ol>'
+        "</section>"
+    )
+
+
 def render_admin_overview(analytics: dict[str, Any], *, reply_mode_text: str) -> str:
     """Render the Admin KPI strip, reply mode banner, and 6-panel chart grid.
 
@@ -965,6 +1044,8 @@ def render_admin_overview(analytics: dict[str, Any], *, reply_mode_text: str) ->
     c_total = _nonneg_int(open_cases.get("total", c_emergency + c_todo))
 
     recent_alerts = _list(data, "recent_alerts")
+    recent_triage_runs = _list(data, "recent_triage_runs")
+    menu_events_7d = _nonneg_int(data.get("menu_events_7d", 0))
     snapshot_hm = _extract_hm(str(data.get("snapshot_at_utc8", ""))) or "实时"
 
     # KPI 1: 7-day inbound + sparkline
@@ -1132,7 +1213,12 @@ def render_admin_overview(analytics: dict[str, Any], *, reply_mode_text: str) ->
         f"近7日Filter分类：问答{_fmt_count(f_question)}条，意见反馈{_fmt_count(f_feedback)}条，"
         f"无效输入{_fmt_count(f_invalid)}条，不支持{_fmt_count(f_unsupported)}条，紧急情况{_fmt_count(f_emergency)}条"
     )
-    gray_note = f"不含灰度口令入组（{_fmt_count(f_gray)} 条）" if f_gray > 0 else "不含灰度口令入组"
+    filter_notes: list[str] = [
+        f"不含灰度口令入组（{_fmt_count(f_gray)} 条）" if f_gray > 0 else "不含灰度口令入组"
+    ]
+    if menu_events_7d > 0:
+        filter_notes.append(f"已剔除菜单/事件推送 {_fmt_count(menu_events_7d)} 条")
+    gray_note = " · ".join(filter_notes)
     panel_categories = (
         '<section class="panel panel--span-4" aria-labelledby="categories-title">'
         '<div class="panel-head">'
@@ -1205,10 +1291,12 @@ def render_admin_overview(analytics: dict[str, Any], *, reply_mode_text: str) ->
         "</div></section>"
     )
 
+    panel_triage = render_triage_audit_panel(recent_triage_runs)
     grid = (
         '<div class="dashboard-grid" aria-label="运营图表">'
         f"{panel_trend}{panel_hourly}{panel_outcomes}"
         f"{panel_categories}{panel_routing}{panel_operations}"
+        f"{panel_triage}"
         "</div>"
     )
     return f"{metric_strip}{status_banner}{grid}"

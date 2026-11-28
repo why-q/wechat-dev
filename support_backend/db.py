@@ -1728,10 +1728,12 @@ class SupportStore:
                 "gray_enroll": 0,
             }
             total_non_gray = 0
+            menu_events_7d = 0
+            menu_events_today = 0
 
             inbound_7d_rows = self._conn.execute(
                 """
-                SELECT received_at_epoch, filter_category
+                SELECT received_at_epoch, filter_category, msg_type, event
                 FROM inbound_events
                 WHERE received_at_epoch >= ? AND received_at_epoch < ?
                 """,
@@ -1739,6 +1741,13 @@ class SupportStore:
             ).fetchall()
             for row in inbound_7d_rows:
                 rec_epoch = float(row["received_at_epoch"])
+                msg_type = str(row["msg_type"] or "").strip().lower()
+                event_name = str(row["event"] or "").strip()
+                if msg_type == "event" or event_name:
+                    menu_events_7d += 1
+                    if today_start_epoch <= rec_epoch < tomorrow_start_epoch:
+                        menu_events_today += 1
+                    continue
                 rec_dt = _epoch_to_utc8(rec_epoch)
                 day_key = rec_dt.strftime("%Y-%m-%d")
                 if day_key in day_counts:
@@ -1763,14 +1772,17 @@ class SupportStore:
             inbound_7d_avg = round(inbound_7d_total / 7.0, 1)
             inbound_today_total = daily_inbound[-1]["count"]
             inbound_all_total = int(
-                self._conn.execute("SELECT COUNT(*) FROM inbound_events").fetchone()[0]
+                self._conn.execute(
+                    "SELECT COUNT(*) FROM inbound_events WHERE msg_type <> 'event' AND event = ''"
+                ).fetchone()[0]
             )
 
             prior_7d_total = int(
                 self._conn.execute(
                     """
                     SELECT COUNT(*) FROM inbound_events
-                    WHERE received_at_epoch >= ? AND received_at_epoch < ?
+                    WHERE msg_type <> 'event' AND event = ''
+                      AND received_at_epoch >= ? AND received_at_epoch < ?
                     """,
                     (prior_7d_start_epoch, day0_epoch),
                 ).fetchone()[0]
@@ -1975,6 +1987,56 @@ class SupportStore:
             alert_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
             recent_alerts = [item[2] for item in alert_candidates[:5]]
 
+            stage_meta: dict[str, tuple[str, str]] = {
+                "exact_alias": ("Tier 1 精确别名", "good"),
+                "decision_preset": ("Tier 1 决策预设", "good"),
+                "tier2_short": ("Tier 2 短答", "good"),
+                "tier2_long": ("Tier 2 长答引文", "good"),
+                "decision_clarify": ("Tier 1 澄清", "ochre"),
+                "tier2_clarify": ("Tier 2 澄清", "ochre"),
+                "decision_staff": ("决策转人工", "ochre"),
+                "tier2_staff": ("检索转人工", "ochre"),
+                "staff_case_appended": ("追加已有待办", "muted"),
+                "clarify_limit_fallback": ("澄清上限兜底", "ochre"),
+                "decision_unknown_fallback": ("超范围兜底", "muted"),
+                "tier2_fallback": ("检索无据兜底", "ochre"),
+                "tier2_error_fallback": ("检索异常兜底", "urgent"),
+                "tier2_unavailable_fallback": ("检索不可用", "urgent"),
+            }
+            recent_triage_runs: list[dict[str, Any]] = []
+            for row in self._conn.execute(
+                """
+                SELECT run_id, batch_id, clarified_already, stage_path, decision_route,
+                       decision_confidence, decision_duration_ms, preset_id, section_title,
+                       staff_case_id, created_at_epoch
+                FROM triage_runs
+                ORDER BY run_id DESC
+                LIMIT 15
+                """
+            ).fetchall():
+                stage = str(row["stage_path"] or "")
+                label, severity = stage_meta.get(stage, (stage or "未知路径", "muted"))
+                ep = float(row["created_at_epoch"])
+                conf_val = row["decision_confidence"]
+                dur_val = row["decision_duration_ms"]
+                recent_triage_runs.append(
+                    {
+                        "run_id": int(row["run_id"]),
+                        "batch_id": int(row["batch_id"]),
+                        "time_utc8": _epoch_to_utc8(ep).strftime("%m-%d %H:%M"),
+                        "stage_path": stage,
+                        "stage_label": label,
+                        "severity": severity,
+                        "decision_route": str(row["decision_route"] or ""),
+                        "decision_confidence": round(float(conf_val), 2) if conf_val is not None else None,
+                        "decision_duration_ms": int(dur_val) if dur_val is not None else None,
+                        "preset_id": str(row["preset_id"] or ""),
+                        "section_title": str(row["section_title"] or ""),
+                        "clarified_already": bool(row["clarified_already"]),
+                        "staff_case_id": int(row["staff_case_id"]) if row["staff_case_id"] is not None else None,
+                    }
+                )
+
             return {
                 "snapshot_at_utc8": now_dt.strftime("%Y-%m-%d %H:%M"),
                 "snapshot_hm": now_dt.strftime("%H:%M"),
@@ -1985,6 +2047,8 @@ class SupportStore:
                 "inbound_today_total": inbound_today_total,
                 "inbound_all_total": inbound_all_total,
                 "inbound_delta_pct": inbound_delta_pct,
+                "menu_events_7d": menu_events_7d,
+                "menu_events_today": menu_events_today,
                 "hourly_inbound_today": hourly_inbound_today,
                 "hourly_range_label": hourly_range_label,
                 "replies_today": replies_today,
@@ -1994,6 +2058,7 @@ class SupportStore:
                 "batches": batches,
                 "open_cases": open_cases,
                 "recent_alerts": recent_alerts,
+                "recent_triage_runs": recent_triage_runs,
             }
 
     def dashboard_librarian_analytics(self, *, now_epoch: float | None = None) -> dict[str, Any]:

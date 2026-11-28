@@ -1624,11 +1624,24 @@ class ExpiryPurgeAndDashboardAnalyticsTests(unittest.TestCase):
                     now_epoch=ep,
                 )
 
+            # Menu event pushes (Event=VIEW) must be excluded from reader message charts and counted separately.
+            for idx in range(3):
+                store.ingest_event(
+                    {"to_user": "gh_lib", "from_user": f"o_secret_menu_{idx}", "msg_type": "event", "event": "VIEW", "content": ""},
+                    classify_message("event", "", event="VIEW"),
+                    received_at_epoch=self._epoch_utc8(2026, 11, 28, 12, idx),
+                )
+
             data = store.dashboard_admin_analytics(now_epoch=now_ep)
             self.assertEqual(data["inbound_7d_total"], 7)
             self.assertEqual(data["inbound_7d_avg"], 1.0)
             self.assertEqual(data["inbound_today_total"], 4)
             self.assertEqual(data["inbound_all_total"], 9)
+            self.assertEqual(data["menu_events_7d"], 3)
+            self.assertEqual(data["menu_events_today"], 3)
+            self.assertEqual(len(data["recent_triage_runs"]), 10)
+            self.assertEqual(data["recent_triage_runs"][0]["stage_path"], "exact_alias")
+            self.assertEqual(data["recent_triage_runs"][0]["stage_label"], "Tier 1 精确别名")
             # (7 - 2) / 2 * 100 = 250.0
             self.assertEqual(data["inbound_delta_pct"], 250.0)
             self.assertEqual(data["hourly_range_label"], "06–19h")

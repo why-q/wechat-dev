@@ -916,6 +916,49 @@ summary:focus-visible {
   text-overflow: ellipsis;
 }
 
+/* Triage Routing Audit List */
+.triage-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.triage-row {
+  display: grid;
+  grid-template-columns: 76px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 5px 0;
+  border-top: 1px solid var(--rule);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.triage-row:first-child {
+  border-top: 0;
+  padding-top: 2px;
+}
+
+.triage-meta {
+  min-width: 0;
+  color: var(--body-ink);
+  overflow-wrap: anywhere;
+}
+
+.triage-tail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.triage-ms,
+.triage-id {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Badges */
 .badge {
   display: inline-flex;
@@ -1913,6 +1956,33 @@ summary:focus-visible {
   .allowlist-remove-known > .button,
   .case-close-form .button {
     justify-self: start;
+  }
+
+  .triage-row {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    row-gap: 3px;
+  }
+
+  .triage-row .inbox-time {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .triage-row > .badge {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: start;
+  }
+
+  .triage-row .triage-tail {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .triage-row .triage-meta {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    font-size: 11.5px;
   }
 }
 

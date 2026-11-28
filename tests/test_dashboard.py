@@ -297,6 +297,16 @@ class DashboardRouteTests(unittest.TestCase):
             },
             FilterDecision(category="feedback", reason="suggestion", normalized_text="建议三楼增加电源插座"),
         )
+        self.store.ingest_event(
+            {
+                "to_user": "official-account",
+                "from_user": "openid-menu-click",
+                "msg_type": "event",
+                "event": "VIEW",
+                "content": "",
+            },
+            FilterDecision(category="unsupported", reason="event", normalized_text=""),
+        )
         self.store.record_triage_run(
             batch_id=1,
             account_id="official-account",
@@ -304,6 +314,10 @@ class DashboardRouteTests(unittest.TestCase):
             generation=1,
             clarified_already=False,
             stage_path="tier2_short",
+            decision_route="public_qa",
+            decision_confidence=0.91,
+            decision_duration_ms=1380,
+            section_title="借阅规则 <测试>",
             reply_preview="短答",
         )
 
@@ -321,6 +335,11 @@ class DashboardRouteTests(unittest.TestCase):
         self.assertIn("<style>", admin.text)
         self.assertIn("近 7 日入站趋势", admin.text)
         self.assertIn("问答分流路径", admin.text)
+        self.assertIn("最近分诊路由审计", admin.text)
+        self.assertIn("Tier 2 短答", admin.text)
+        self.assertIn("借阅规则 &lt;测试&gt;", admin.text)
+        self.assertIn("1380ms", admin.text)
+        self.assertIn("已剔除菜单/事件推送 1 条", admin.text)
         self.assertIn("<svg", admin.text)
         self.assertIn("script-src 'sha256-", admin.headers["content-security-policy"])
         self.assertIn("allowlist-select-all", admin.text)
