@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,9 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import urlsplit
 
 from .presets import split_frontmatter
+from .shared import extract_json_object
+
+_LOGGER = logging.getLogger("uvicorn.error")
 
 DEFAULT_CHUNK_SIZE = 512
 DEFAULT_CHUNK_OVERLAP = 80
@@ -454,19 +458,7 @@ def format_grounded_answer(
 
 
 def _extract_json_object(raw_text: str) -> dict[str, Any]:
-    text = raw_text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if len(lines) >= 3 and lines[0].startswith("```") and lines[-1].strip() == "```":
-            text = "\n".join(lines[1:-1]).strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
-        raise ValueError("no JSON object found")
-    parsed = json.loads(text[start : end + 1])
-    if not isinstance(parsed, dict):
-        raise ValueError("JSON root is not an object")
-    return parsed
+    return extract_json_object(raw_text)
 
 
 class Tier2KnowledgeResponder:
@@ -582,9 +574,20 @@ class Tier2KnowledgeResponder:
             try:
                 from llama_index.core.base.llms.types import ChatMessage, MessageRole
 
-                llm_response = self._llm.chat(
-                    [ChatMessage(role=MessageRole.USER, content=prompt)]
-                )
+                messages = [ChatMessage(role=MessageRole.USER, content=prompt)]
+                try:
+                    llm_response = self._llm.chat(
+                        messages,
+                        response_format={"type": "json_object"},
+                    )
+                except Exception as exc:
+                    err_text = str(exc).lower()
+                    if isinstance(exc, TypeError) or any(
+                        tok in err_text for tok in ("response_format", "json_object", "400", "422", "unsupported")
+                    ):
+                        llm_response = self._llm.chat(messages)
+                    else:
+                        raise
                 raw_content = getattr(llm_response.message, "content", None) or str(llm_response)
             except Exception:
                 raise KnowledgeError("llm_synthesis_failed", "公开资料归纳生成阶段失败") from None
@@ -592,6 +595,13 @@ class Tier2KnowledgeResponder:
         try:
             parsed = _extract_json_object(str(raw_content))
         except Exception:
+            raw_str = str(raw_content or "")
+            _LOGGER.warning(
+                "Tier 2 LLM returned non-JSON: len=%d has_open=%s has_close=%s",
+                len(raw_str),
+                str("{" in raw_str).lower(),
+                str("}" in raw_str).lower(),
+            )
             raise KnowledgeError("llm_invalid_json", "生成结果不符合 JSON 结构") from None
 
         outcome = str(parsed.get("outcome") or "").strip().lower()

@@ -669,6 +669,32 @@ class ResponderHotReloadTests(unittest.TestCase):
         self.assertEqual(created.preset_id, "preset_silent_pod")
         self.assertEqual(created.title, "静音舱预约")
 
+    def test_extract_json_object_handles_think_fences_multiple_braces_newlines_and_trailing_commas(self):
+        from support_backend.shared import extract_json_object
+
+        # 1) <think> block containing curly braces + prose + markdown json fence
+        raw1 = (
+            "<think>先检查示例 {foo: bar} 再整理输出</think>\n"
+            "好的，下面是整理结果：\n"
+            "```json\n"
+            '{"outcome": "unsupported", "note": "第一行\n第二行",}\n'
+            "```\n"
+            "希望有帮助。"
+        )
+        parsed1 = extract_json_object(raw1)
+        self.assertEqual(parsed1["outcome"], "unsupported")
+        self.assertIn("第二行", parsed1["note"])
+
+        # 2) Multiple brace objects in prose -> takes the final valid dict
+        raw2 = '示例格式 {"example": 1}，实际返回 {"outcome": "answered", "source_index": 2}'
+        parsed2 = extract_json_object(raw2)
+        self.assertEqual(parsed2["outcome"], "answered")
+        self.assertEqual(parsed2["source_index"], 2)
+
+        # 3) Pure non-JSON text raises ValueError cleanly
+        with self.assertRaises(ValueError):
+            extract_json_object("资料中未提及静音舱预约规则。")
+
 
 if __name__ == "__main__":
     unittest.main()

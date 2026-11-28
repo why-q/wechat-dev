@@ -15,6 +15,7 @@ from urllib import request as urllib_request
 from urllib.parse import urlsplit
 
 from .presets import PresetCatalog, normalize_alias_text
+from .shared import extract_json_object
 
 _PRESET_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{3,64}$")
 _URL_RE = re.compile(r"https?://[^\s<>()\]\"']+")
@@ -86,25 +87,10 @@ def _is_valid_http_base(url: str) -> bool:
 
 
 def _extract_json_dict(raw_content: str) -> dict[str, Any]:
-    text = raw_content.strip()
-    fence_match = _CODE_FENCE_RE.match(text)
-    if fence_match is not None:
-        text = fence_match.group(1).strip()
     try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end > start:
-            try:
-                parsed = json.loads(text[start : end + 1])
-            except json.JSONDecodeError as inner_exc:
-                raise RuntimeError(f"LLM 返回非合法 JSON：{inner_exc}") from inner_exc
-        else:
-            raise RuntimeError(f"LLM 返回非合法 JSON：{exc}") from exc
-    if not isinstance(parsed, dict):
-        raise RuntimeError("LLM 返回的 JSON 顶层必须是对象")
-    return parsed
+        return extract_json_object(raw_content)
+    except ValueError as exc:
+        raise RuntimeError(f"LLM 返回非合法 JSON：{exc}") from exc
 
 
 class OpenAICompatiblePresetLLM:
@@ -129,19 +115,8 @@ class OpenAICompatiblePresetLLM:
     def is_configured(self) -> bool:
         return bool(self.api_base and self.api_key and self.model and _is_valid_http_base(self.api_base))
 
-    def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        if not self.is_configured:
-            raise RuntimeError("RAG_LLM_* 环境变量未完整配置或 API Base 格式无效")
-
+    def _post_completion(self, payload: dict[str, Any]) -> str:
         endpoint = f"{self.api_base.rstrip('/')}/chat/completions"
-        payload = {
-            "model": self.model,
-            "temperature": 0.1,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-        }
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib_request.Request(
             endpoint,
@@ -152,16 +127,44 @@ class OpenAICompatiblePresetLLM:
             },
             method="POST",
         )
+        with urllib_request.urlopen(req, timeout=self.timeout_seconds) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+
+    def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        if not self.is_configured:
+            raise RuntimeError("RAG_LLM_* 环境变量未完整配置或 API Base 格式无效")
+
+        base_payload: dict[str, Any] = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        payload_with_json_mode = {
+            **base_payload,
+            "response_format": {"type": "json_object"},
+        }
         try:
-            with urllib_request.urlopen(req, timeout=self.timeout_seconds) as resp:
-                raw_body = resp.read().decode("utf-8", errors="replace")
+            raw_body = self._post_completion(payload_with_json_mode)
         except urllib_error.HTTPError as exc:
             detail = ""
             try:
                 detail = exc.read().decode("utf-8", errors="replace")[:200]
             except Exception:
                 detail = str(exc.reason)
-            raise RuntimeError(f"LLM HTTP 错误 {exc.code}: {detail}") from exc
+            if exc.code in {400, 422} and any(
+                tok in detail.lower() for tok in ("response_format", "json_object", "unsupported")
+            ):
+                try:
+                    raw_body = self._post_completion(base_payload)
+                except urllib_error.HTTPError as retry_exc:
+                    raise RuntimeError(f"LLM HTTP 错误 {retry_exc.code}: {retry_exc.reason}") from retry_exc
+                except (urllib_error.URLError, TimeoutError, OSError) as retry_exc:
+                    raise RuntimeError(f"LLM 请求失败：{retry_exc}") from retry_exc
+            else:
+                raise RuntimeError(f"LLM HTTP 错误 {exc.code}: {detail}") from exc
         except (urllib_error.URLError, TimeoutError, OSError) as exc:
             raise RuntimeError(f"LLM 请求失败：{exc}") from exc
 

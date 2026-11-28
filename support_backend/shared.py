@@ -2,7 +2,69 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
+from typing import Any
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
+_FENCED_BLOCK_RE = re.compile(r"```(?:json)?\s*\n?(.*?)```", re.IGNORECASE | re.DOTALL)
+_TRAILING_COMMA_RE = re.compile(r",\s*([}\]])")
+
+
+def _scan_json_dicts(text: str) -> list[dict[str, Any]]:
+    decoder = json.JSONDecoder(strict=False)
+    found: list[dict[str, Any]] = []
+    pos = 0
+    length = len(text)
+    while pos < length:
+        brace = text.find("{", pos)
+        if brace < 0:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, brace)
+        except json.JSONDecodeError:
+            pos = brace + 1
+            continue
+        if isinstance(obj, dict):
+            found.append(obj)
+            pos = end
+        else:
+            pos = brace + 1
+    return found
+
+
+def extract_json_object(raw_text: str) -> dict[str, Any]:
+    """Robustly extract a JSON object from LLM output (tolerates <think>, fences, prose, control chars, trailing commas)."""
+    cleaned = _THINK_BLOCK_RE.sub("", str(raw_text or "")).strip()
+    if not cleaned:
+        raise ValueError("empty LLM output")
+
+    # Fast path: clean JSON object (e.g. native JSON mode).
+    try:
+        direct = json.loads(cleaned, strict=False)
+        if isinstance(direct, dict):
+            return direct
+    except json.JSONDecodeError:
+        pass
+
+    # Candidate sources: fenced blocks first (in reverse order), then full cleaned text.
+    candidates: list[str] = []
+    fenced = [m.group(1).strip() for m in _FENCED_BLOCK_RE.finditer(cleaned) if m.group(1).strip()]
+    candidates.extend(reversed(fenced))
+    candidates.append(cleaned)
+
+    for candidate in candidates:
+        dicts = _scan_json_dicts(candidate)
+        if dicts:
+            return dicts[-1]
+        repaired = _TRAILING_COMMA_RE.sub(r"\1", candidate)
+        if repaired != candidate:
+            dicts = _scan_json_dicts(repaired)
+            if dicts:
+                return dicts[-1]
+
+    raise ValueError("no valid JSON object found")
 
 
 def env_bool(name: str, default: bool = False) -> bool:
