@@ -74,6 +74,7 @@ class InboxProjectionTests(unittest.TestCase):
                 self.assertIn("https://example.invalid/path", rendered)
                 self.assertIn("建议增加自习室座位", rendered)
                 self.assertIn("灰度入组消息", rendered)
+                self.assertNotIn("文本消息", rendered)
                 self.assertNotIn(keyword, rendered)
                 self.assertIn("&lt;b&gt;markup &amp; text&lt;/b&gt;", rendered)
                 self.assertNotIn("<b>markup & text</b>", rendered)
